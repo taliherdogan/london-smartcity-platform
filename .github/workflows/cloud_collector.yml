@@ -2,8 +2,8 @@ name: 24/7 London Smart City Cloud Collector
 
 on:
   schedule:
-    # Public repo: unlimited free GitHub Actions minutes (every 15 min = 96 real snapshots/day)
-    - cron: "*/15 * * * *"
+    # Public repo: unlimited free GitHub Actions minutes (every 15 min, offset from :00/:15/:30/:45 queue spikes)
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       retention_days:
