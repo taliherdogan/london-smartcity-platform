@@ -42,7 +42,6 @@ function SystemHealthPanel({ systemHealth }) {
   const spark = systemHealth.spark || null
   const gen = systemHealth.generator || null
   const mssql = systemHealth.mssql || null
-  const backfill = systemHealth.backfill || null
   const backend = systemHealth.backend || {}
 
   return (
@@ -184,22 +183,6 @@ function SystemHealthPanel({ systemHealth }) {
               <span>{mssql?.database ?? 'SmartCityDB'}</span>
               <span className="font-mono">{mssql?.db_size_mb ?? 0} MB</span>
             </div>
-            {backfill && (
-              <div className="mt-1 flex items-center justify-between border-t border-slate-100 pt-1 text-[10px] font-semibold">
-                <span className={backfill.cloud_configured ? 'text-indigo-600' : 'text-slate-400'}>
-                  {backfill.running
-                    ? 'Bulut senkronize ediliyor…'
-                    : backfill.cloud_configured
-                      ? '7/24 Bulut Aktif'
-                      : 'Bulut Repo Ayarlanmadı'}
-                </span>
-                {(mssql?.source_breakdown?.cloud_snapshots ?? 0) > 0 && (
-                  <span className="font-mono text-indigo-600">
-                    +{formatInt(mssql.source_breakdown.cloud_snapshots)} bulut
-                  </span>
-                )}
-              </div>
-            )}
           </div>
 
           {/* Backend WS */}

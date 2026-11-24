@@ -12,7 +12,6 @@ frontend/dist/
 
 # Spark & Lake temp files
 data/lake/
-data/cloud_archive/
 spark-warehouse/
 metastore_db/
 derby.log

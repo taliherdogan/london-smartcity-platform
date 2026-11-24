@@ -136,7 +136,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      DEFAULT_RATE: ${DEFAULT_RATE:-100}
+      DEFAULT_RATE: ${DEFAULT_RATE:-10}
       MAX_EVENT_RATE: ${MAX_EVENT_RATE:-25000}
       API_POLL_INTERVAL_SEC: ${API_POLL_INTERVAL_SEC:-60}
       METADATA_PATH: /data/metadata/london_districts.json
@@ -176,10 +176,10 @@ services:
       LAKE_DIR: /data/lake
       CHECKPOINT_DIR: /tmp/spark-spill/checkpoints
       SPARK_LOCAL_DIR: /tmp/spark-spill/local
-      TRIGGER_INTERVAL_SEC: ${TRIGGER_INTERVAL_SEC:-2}
+      TRIGGER_INTERVAL_SEC: ${TRIGGER_INTERVAL_SEC:-3}
       SPARK_MASTER: ${SPARK_MASTER:-local[4]}
       SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-1280m}
-      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-8}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-2}
       MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER:-50000}
       ARCHIVE_EVERY_N_BATCHES: ${ARCHIVE_EVERY_N_BATCHES:-10}
       ARCHIVE_CSV_ENABLED: ${ARCHIVE_CSV_ENABLED:-false}
@@ -225,11 +225,6 @@ services:
       MSSQL_AUTO_BACKFILL_ENABLED: ${MSSQL_AUTO_BACKFILL_ENABLED:-true}
       MSSQL_AUTO_BACKFILL_HOURS: ${MSSQL_AUTO_BACKFILL_HOURS:-72}
       MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL: ${MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL:-false}
-      CLOUD_ARCHIVE_REPO: ${CLOUD_ARCHIVE_REPO:-}
-      CLOUD_ARCHIVE_BRANCH: ${CLOUD_ARCHIVE_BRANCH:-data-archive}
-      CLOUD_ARCHIVE_TOKEN: ${CLOUD_ARCHIVE_TOKEN:-}
-      CLOUD_ARCHIVE_LOCAL_DIR: /data/cloud_archive
-      CLOUD_SYNC_INTERVAL_MIN: ${CLOUD_SYNC_INTERVAL_MIN:-30}
       BENCHMARK_RESULTS_DIR: /app/benchmark_results
       METADATA_PATH: /data/metadata/london_districts.json
       LAKE_DIR: /data/lake
@@ -240,7 +235,6 @@ services:
     volumes:
       - ./benchmarks/results:/app/benchmark_results
       - ./data/metadata:/data/metadata:ro
-      - ./data/cloud_archive:/data/cloud_archive:ro
       - lake_data:/data/lake:ro
     mem_limit: 512m
     logging: *default-logging

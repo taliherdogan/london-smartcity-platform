@@ -149,7 +149,6 @@ def get_storage_summary() -> dict[str, Any]:
         "cumulative_alerts": 0,
         "source_breakdown": {
             "live_snapshots": 0,
-            "cloud_snapshots": 0,
             "backfill_snapshots": 0,
         },
     }
@@ -215,8 +214,7 @@ def get_storage_summary() -> dict[str, Any]:
                     """
                     SELECT
                         SUM(CASE WHEN batch_id >= 0 THEN 1 ELSE 0 END) AS live_snapshots,
-                        SUM(CASE WHEN batch_id = -2 THEN 1 ELSE 0 END) AS cloud_snapshots,
-                        SUM(CASE WHEN batch_id = -1 THEN 1 ELSE 0 END) AS backfill_snapshots
+                        SUM(CASE WHEN batch_id < 0 THEN 1 ELSE 0 END) AS backfill_snapshots
                     FROM dbo.domain_snapshots
                     """
                 )
@@ -224,7 +222,6 @@ def get_storage_summary() -> dict[str, Any]:
                 if sb:
                     base["source_breakdown"] = {
                         "live_snapshots": int(sb.get("live_snapshots") or 0),
-                        "cloud_snapshots": int(sb.get("cloud_snapshots") or 0),
                         "backfill_snapshots": int(sb.get("backfill_snapshots") or 0),
                     }
 

@@ -168,7 +168,7 @@ async def _clear_history_cache() -> int:
 
 
 async def auto_backfill_loop() -> None:
-    """On startup (and optionally periodically), sync 24/7 Cloud Collector & past API hours into MSSQL."""
+    """On startup, backfill missing past hours from official historical APIs into MSSQL."""
     cfg = backfill_settings()
     if not cfg["auto_enabled"]:
         logger.info("Automatic MSSQL backfill disabled via MSSQL_AUTO_BACKFILL_ENABLED=false")
@@ -189,31 +189,6 @@ async def auto_backfill_loop() -> None:
         )
         if res.get("total_rows_inserted", 0) > 0:
             await _clear_history_cache()
-
-        interval_min = int(cfg.get("sync_interval_min") or 0)
-        if interval_min <= 0:
-            return
-
-        while True:
-            await asyncio.sleep(interval_min * 60)
-            fresh_cfg = backfill_settings()
-            if not fresh_cfg["auto_enabled"]:
-                continue
-            status_now = get_backfill_status()
-            if not status_now.get("cloud_configured"):
-                continue
-            try:
-                res = await sync_missing_to_mssql(
-                    metadata_path=METADATA_PATH,
-                    hours=min(24, fresh_cfg["auto_hours"]),
-                    source_mode="cloud_only",
-                    include_districts=True,
-                    trigger="scheduled",
-                )
-                if res.get("total_rows_inserted", 0) > 0:
-                    await _clear_history_cache()
-            except Exception as exc:
-                logger.warning("Scheduled cloud sync warning: %s", exc)
     except asyncio.CancelledError:
         return
     except Exception as exc:
@@ -289,7 +264,7 @@ app.add_middleware(
 
 
 class RateRequest(BaseModel):
-    rate: int = Field(..., ge=20, le=MAX_EVENT_RATE, description="Target events per second")
+    rate: int = Field(..., ge=10, le=MAX_EVENT_RATE, description="Target events per second")
 
 
 class AnomalyRequest(BaseModel):
@@ -302,7 +277,7 @@ class BackfillRequest(BaseModel):
     start_date: str | None = Field(default=None, description="Start date (YYYY-MM-DD)")
     end_date: str | None = Field(default=None, description="End date (YYYY-MM-DD)")
     hours: int | None = Field(default=None, ge=1, le=744, description="Shortcut: sync last N hours")
-    source_mode: str = Field(default="auto", pattern="^(auto|cloud_only|api_only)$")
+    source_mode: str = Field(default="auto", pattern="^(auto|api_only)$")
     include_districts: bool = Field(default=True, description="Also fill 32 boroughs in district_measurements")
     allow_traffic_model: bool | None = Field(
         default=None,
@@ -391,7 +366,7 @@ async def get_sources() -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}") from exc
 
     sources = json.loads(raw) if raw else {}
-    rate = int(raw_rate or 100)
+    rate = int(raw_rate or 10)
     active_anom = json.loads(raw_anom) if raw_anom else None
     if active_anom and active_anom.get("expires_at", 0) <= time.time():
         active_anom = None
@@ -419,7 +394,7 @@ async def get_latest_state() -> dict[str, Any]:
     return {
         "state": json.loads(raw_state) if raw_state else None,
         "sources": json.loads(raw_sources) if raw_sources else {},
-        "target_rate": int(raw_rate or 100),
+        "target_rate": int(raw_rate or 10),
     }
 
 
@@ -648,13 +623,13 @@ async def storage_alerts(
 
 @app.get("/api/storage/backfill/status")
 async def storage_backfill_status() -> dict[str, Any]:
-    """Return 24/7 Cloud Collector sync configuration and last MSSQL backfill run stats."""
+    """Return MSSQL historical API backfill configuration and last run stats."""
     return get_backfill_status()
 
 
 @app.post("/api/storage/backfill")
 async def trigger_storage_backfill(req: BackfillRequest | None = None) -> dict[str, Any]:
-    """Synchronize missing past hours from 24/7 Cloud Collector archive & official APIs into MSSQL."""
+    """Backfill missing past hours from official historical Open APIs into MSSQL."""
     body = req or BackfillRequest()
     try:
         result = await sync_missing_to_mssql(

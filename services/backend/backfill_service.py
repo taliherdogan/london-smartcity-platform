@@ -1,14 +1,9 @@
-"""24/7 Cloud Archive Sync & Historical API Backfill Service for MSSQL (SmartCityDB).
+"""Historical Open API Backfill Service for MSSQL (SmartCityDB).
 
-Fills missing past hours in MSSQL (e.g. overnight hours when the local PC was off)
-using a strict, idempotent priority hierarchy:
+Fills missing past hours in MSSQL using a strict, idempotent priority hierarchy:
   1. Live Spark Streaming records (`batch_id >= 0`) — NEVER overwritten.
-  2. 24/7 Cloud Collector real live captures (`batch_id = -2`) from GitHub `data-archive`
-     branch (or local archive dir) — 100% real live TfL Road traffic, Open-Meteo weather
-     & air quality, and Elexon/NESO energy at 15-minute resolution. Automatically upgrades
-     any prior API/model fallback rows (`batch_id = -1`) for the same hour.
-  3. Official Historical Open APIs (`batch_id = -1`) for dates prior to Cloud Collector
-     activation (Open-Meteo Weather, Open-Meteo AQI, Elexon BMRS, NESO Region 13).
+  2. Official Historical Open APIs (`batch_id = -1`): Open-Meteo Weather, Open-Meteo AQI,
+     Elexon BMRS, and NESO Region 13.
      By default (`MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL=false`), synthetic/model traffic is
      NOT inserted into MSSQL so all stored traffic records remain 100% real.
 """
@@ -51,7 +46,6 @@ from mssql_reader import _config as mssql_config
 
 logger = logging.getLogger("backfill_service")
 
-BATCH_ID_CLOUD = -2
 BATCH_ID_API_BACKFILL = -1
 VALID_DOMAINS = ("traffic", "weather", "air_quality", "energy")
 INSERT_CHUNK_SIZE = 500
@@ -71,28 +65,16 @@ def backfill_settings() -> dict[str, Any]:
         "auto_enabled": os.getenv("MSSQL_AUTO_BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes"),
         "auto_hours": max(1, min(168, int(os.getenv("MSSQL_AUTO_BACKFILL_HOURS", "72")))),
         "allow_traffic_model": os.getenv("MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL", "false").lower() in ("1", "true", "yes"),
-        "cloud_repo": os.getenv("CLOUD_ARCHIVE_REPO", "").strip().strip("/"),
-        "cloud_branch": os.getenv("CLOUD_ARCHIVE_BRANCH", "data-archive").strip() or "data-archive",
-        "cloud_token": os.getenv("CLOUD_ARCHIVE_TOKEN", "").strip(),
-        "cloud_local_dir": os.getenv("CLOUD_ARCHIVE_LOCAL_DIR", "/data/cloud_archive").strip(),
-        "sync_interval_min": max(0, int(os.getenv("CLOUD_SYNC_INTERVAL_MIN", "30"))),
     }
 
 
 def get_backfill_status() -> dict[str, Any]:
     cfg = backfill_settings()
-    local_dir = Path(cfg["cloud_local_dir"]) if cfg["cloud_local_dir"] else None
-    has_local_archive = bool(local_dir and (local_dir / "snapshots").exists())
     return {
         "running": _BACKFILL_STATUS["running"],
         "auto_enabled": cfg["auto_enabled"],
         "auto_hours": cfg["auto_hours"],
         "allow_traffic_model": cfg["allow_traffic_model"],
-        "cloud_configured": bool(cfg["cloud_repo"]) or has_local_archive,
-        "cloud_repo": cfg["cloud_repo"] or None,
-        "cloud_branch": cfg["cloud_branch"],
-        "cloud_local_archive": has_local_archive,
-        "sync_interval_min": cfg["sync_interval_min"],
         "last_run_at": _BACKFILL_STATUS["last_run_at"],
         "last_trigger": _BACKFILL_STATUS["last_trigger"],
         "last_result": _BACKFILL_STATUS["last_result"],
@@ -107,24 +89,6 @@ def _london_naive_to_utc_naive(lon_naive: datetime) -> datetime:
     candidate_utc = assumed_utc - offset
     verified_offset = _uk_utc_offset(candidate_utc)
     return (assumed_utc - verified_offset).replace(tzinfo=None)
-
-
-def _parse_iso_naive_utc(ts_str: str) -> datetime:
-    cleaned = ts_str.strip()
-    if cleaned.endswith("Z"):
-        cleaned = cleaned[:-1] + "+00:00"
-    dt = datetime.fromisoformat(cleaned)
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0)
-    return dt.replace(microsecond=0)
-
-
-def _parse_iso_naive_local(ts_str: str) -> datetime:
-    cleaned = ts_str.strip()
-    if cleaned.endswith("Z"):
-        cleaned = cleaned[:-1] + "+00:00"
-    dt = datetime.fromisoformat(cleaned)
-    return dt.replace(tzinfo=None, microsecond=0)
 
 
 def _connect_rw(timeout: int = 15) -> Any:
@@ -183,131 +147,13 @@ async def wait_for_mssql_schema(max_wait_sec: float = 60.0) -> bool:
         await asyncio.sleep(2.5)
 
 
-def _parse_jsonl_text(text: str) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-            if isinstance(obj, dict) and obj.get("recorded_at_utc") and isinstance(obj.get("domains"), dict):
-                records.append(obj)
-        except json.JSONDecodeError:
-            continue
-    return records
-
-
-async def fetch_cloud_snapshots(
-    start_date: date,
-    end_date: date,
-    *,
-    window_start_lon: datetime,
-    window_end_lon: datetime,
-    http_client: httpx.AsyncClient | None = None,
-    settings: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Load 24/7 Cloud Collector snapshots from local archive dir and/or GitHub raw branch."""
-    cfg = settings or backfill_settings()
-    today_utc = datetime.now(timezone.utc).date()
-    # Expand UTC date scan by +/- 1 day to safely cover Europe/London BST/GMT boundaries
-    utc_start = start_date - timedelta(days=1)
-    utc_end = min(today_utc, end_date + timedelta(days=1))
-
-    utc_dates: list[date] = []
-    cur = utc_start
-    while cur <= utc_end:
-        utc_dates.append(cur)
-        cur += timedelta(days=1)
-
-    by_key: dict[str, dict[str, Any]] = {}
-    stats: dict[str, Any] = {
-        "local_files_read": 0,
-        "remote_files_read": 0,
-        "snapshots_loaded": 0,
-    }
-
-    # 1. Local directory (useful for VPS/cron or local testing)
-    local_root = Path(cfg["cloud_local_dir"]) if cfg.get("cloud_local_dir") else None
-    if local_root and local_root.exists():
-        for d_utc in utc_dates:
-            fpath = local_root / "snapshots" / f"{d_utc.year:04d}" / f"{d_utc.month:02d}" / f"{d_utc.isoformat()}.jsonl"
-            if fpath.is_file():
-                try:
-                    recs = _parse_jsonl_text(fpath.read_text(encoding="utf-8"))
-                    stats["local_files_read"] += 1
-                    for rec in recs:
-                        k = str(rec.get("snapshot_id") or rec.get("recorded_at_utc"))
-                        by_key[k] = rec
-                except OSError as exc:
-                    logger.warning("Failed reading local cloud archive %s: %s", fpath, exc)
-
-    # 2. GitHub raw archive branch (public or token-authenticated private repo)
-    repo = cfg.get("cloud_repo") or ""
-    branch = cfg.get("cloud_branch") or "data-archive"
-    token = cfg.get("cloud_token") or ""
-
-    if repo:
-        headers = {
-            "Accept": "text/plain",
-            "Cache-Control": "no-cache",
-            "User-Agent": "SmartCityLondonBackfill/1.0",
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        async def _fetch_day(client: httpx.AsyncClient, d_utc: date) -> list[dict[str, Any]]:
-            url = (
-                f"https://raw.githubusercontent.com/{repo}/{branch}"
-                f"/snapshots/{d_utc.year:04d}/{d_utc.month:02d}/{d_utc.isoformat()}.jsonl"
-            )
-            try:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code == 404:
-                    return []
-                resp.raise_for_status()
-                stats["remote_files_read"] += 1
-                return _parse_jsonl_text(resp.text)
-            except Exception as exc:
-                logger.warning("Cloud archive fetch warning (%s): %s", url, exc)
-                return []
-
-        if http_client is not None:
-            day_results = await asyncio.gather(*(_fetch_day(http_client, d) for d in utc_dates))
-        else:
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                day_results = await asyncio.gather(*(_fetch_day(client, d) for d in utc_dates))
-
-        for recs in day_results:
-            for rec in recs:
-                k = str(rec.get("snapshot_id") or rec.get("recorded_at_utc"))
-                by_key[k] = rec
-
-    # Filter to requested London time window and sort chronologically
-    filtered: list[tuple[datetime, dict[str, Any]]] = []
-    for rec in by_key.values():
-        try:
-            lon_dt = _parse_iso_naive_local(str(rec["london_time"]))
-        except Exception:
-            continue
-        if window_start_lon <= lon_dt <= window_end_lon:
-            filtered.append((lon_dt, rec))
-
-    filtered.sort(key=lambda item: item[0])
-    out = [rec for _, rec in filtered]
-    stats["snapshots_loaded"] = len(out)
-    return out, stats
-
-
 def _inspect_existing_mssql_coverage(
     window_start_lon: datetime,
     window_end_lon: datetime,
 ) -> dict[str, Any]:
-    """Query existing live, cloud, and API backfill rows in MSSQL for idempotent sync."""
+    """Query existing live and API backfill rows in MSSQL for idempotent sync."""
     live_hours: dict[str, set[str]] = defaultdict(set)
-    cloud_hours: dict[str, set[str]] = defaultdict(set)
     api_hours: dict[str, set[str]] = defaultdict(set)
-    cloud_exact_ts: set[tuple[datetime, str]] = set()
 
     conn = None
     try:
@@ -319,13 +165,12 @@ def _inspect_existing_mssql_coverage(
                     DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0) AS hour_bucket,
                     domain,
                     MAX(CASE WHEN batch_id >= 0 THEN 1 ELSE 0 END) AS has_live,
-                    MAX(CASE WHEN batch_id = %s THEN 1 ELSE 0 END) AS has_cloud,
                     MAX(CASE WHEN batch_id = %s THEN 1 ELSE 0 END) AS has_api
                 FROM dbo.domain_snapshots
                 WHERE london_time >= %s AND london_time <= %s
                 GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0), domain
                 """,
-                (BATCH_ID_CLOUD, BATCH_ID_API_BACKFILL, window_start_lon, window_end_lon),
+                (BATCH_ID_API_BACKFILL, window_start_lon, window_end_lon),
             )
             for row in cur.fetchall() or []:
                 hb = row.get("hour_bucket")
@@ -335,30 +180,12 @@ def _inspect_existing_mssql_coverage(
                 h_key = hb.strftime("%Y-%m-%dT%H:00")
                 if row.get("has_live"):
                     live_hours[h_key].add(dom)
-                if row.get("has_cloud"):
-                    cloud_hours[h_key].add(dom)
                 if row.get("has_api"):
                     api_hours[h_key].add(dom)
 
-            cur.execute(
-                """
-                SELECT recorded_at, domain
-                FROM dbo.domain_snapshots
-                WHERE london_time >= %s AND london_time <= %s AND batch_id = %s
-                """,
-                (window_start_lon, window_end_lon, BATCH_ID_CLOUD),
-            )
-            for row in cur.fetchall() or []:
-                rec = row.get("recorded_at")
-                dom = str(row.get("domain") or "")
-                if isinstance(rec, datetime) and dom in VALID_DOMAINS:
-                    cloud_exact_ts.add((rec.replace(microsecond=0), dom))
-
         return {
             "live_hours": live_hours,
-            "cloud_hours": cloud_hours,
             "api_hours": api_hours,
-            "cloud_exact_ts": cloud_exact_ts,
         }
     finally:
         if conn is not None:
@@ -372,33 +199,15 @@ def _write_backfill_rows(
     *,
     domain_rows: list[tuple[Any, ...]],
     district_rows: list[tuple[Any, ...]],
-    upgrade_api_hours: list[tuple[datetime, datetime, str]],
 ) -> None:
-    """Persist new cloud/API backfill rows atomically in chunked executemany batches."""
-    if not domain_rows and not district_rows and not upgrade_api_hours:
+    """Persist new API backfill rows atomically in chunked executemany batches."""
+    if not domain_rows and not district_rows:
         return
 
     conn = None
     try:
         conn = _connect_rw(timeout=30)
         with conn.cursor() as cur:
-            # Upgrade prior API/model fallback rows (-1) where real Cloud Collector data (-2) arrived
-            for h_start, h_end, dom in upgrade_api_hours:
-                cur.execute(
-                    """
-                    DELETE FROM dbo.domain_snapshots
-                    WHERE london_time >= %s AND london_time < %s AND domain = %s AND batch_id = %s
-                    """,
-                    (h_start, h_end, dom, BATCH_ID_API_BACKFILL),
-                )
-                cur.execute(
-                    """
-                    DELETE FROM dbo.district_measurements
-                    WHERE london_time >= %s AND london_time < %s AND domain = %s AND batch_id = %s
-                    """,
-                    (h_start, h_end, dom, BATCH_ID_API_BACKFILL),
-                )
-
             if domain_rows:
                 sql_dom = """
                     INSERT INTO dbo.domain_snapshots (
@@ -437,121 +246,6 @@ def _write_backfill_rows(
                 pass
 
 
-def _build_cloud_rows(
-    *,
-    snapshots: list[dict[str, Any]],
-    districts_by_id: dict[str, dict[str, Any]],
-    coverage: dict[str, Any],
-    include_districts: bool,
-    allow_traffic_model: bool,
-) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], list[tuple[datetime, datetime, str]], dict[str, Any]]:
-    live_hours: dict[str, set[str]] = coverage["live_hours"]
-    cloud_hours: dict[str, set[str]] = coverage["cloud_hours"]
-    api_hours: dict[str, set[str]] = coverage["api_hours"]
-    cloud_exact_ts: set[tuple[datetime, str]] = coverage["cloud_exact_ts"]
-
-    domain_rows: list[tuple[Any, ...]] = []
-    district_rows: list[tuple[Any, ...]] = []
-    upgrade_keys: set[tuple[str, str]] = set()
-    synced_snapshot_ids: set[str] = set()
-    last_cloud_ts: str | None = None
-
-    for snap in snapshots:
-        rec_utc = _parse_iso_naive_utc(str(snap["recorded_at_utc"]))
-        lon_dt = _parse_iso_naive_local(str(snap["london_time"]))
-        hour_key = lon_dt.strftime("%Y-%m-%dT%H:00")
-        snap_domains = snap.get("domains") or {}
-        snap_districts = snap.get("districts") or {}
-
-        for dom in VALID_DOMAINS:
-            d_info = snap_domains.get(dom)
-            if not isinstance(d_info, dict) or d_info.get("avg_value") is None:
-                continue
-
-            status_flag = str(d_info.get("status") or "live").lower()
-            if dom == "traffic" and status_flag != "live" and not allow_traffic_model:
-                continue
-            if dom in live_hours.get(hour_key, set()):
-                continue
-            if (rec_utc, dom) in cloud_exact_ts:
-                continue
-
-            if dom in api_hours.get(hour_key, set()):
-                upgrade_keys.add((hour_key, dom))
-
-            provider = str(d_info.get("provider") or "Cloud Collector")
-            source_tag = "Cloud Collector Live" if status_flag == "live" else "Cloud Collector Fallback"
-            data_source = f"{provider} ({source_tag})"
-            avg_v = float(d_info["avg_value"])
-            min_v = float(d_info["min_value"]) if d_info.get("min_value") is not None else avg_v
-            max_v = float(d_info["max_value"]) if d_info.get("max_value") is not None else avg_v
-
-            domain_rows.append(
-                (
-                    rec_utc,
-                    lon_dt,
-                    BATCH_ID_CLOUD,
-                    dom,
-                    d_info.get("metric_name"),
-                    avg_v,
-                    min_v,
-                    max_v,
-                    d_info.get("unit"),
-                    1,
-                    data_source,
-                    json.dumps(d_info.get("secondary") or {}, separators=(",", ":")),
-                )
-            )
-
-            if include_districts and isinstance(snap_districts, dict):
-                for did, dist_entry in snap_districts.items():
-                    meta = districts_by_id.get(did)
-                    if not meta or not isinstance(dist_entry, dict):
-                        continue
-                    m = dist_entry.get(dom)
-                    if not isinstance(m, dict) or m.get("avg") is None:
-                        continue
-                    val = float(m["avg"])
-                    district_rows.append(
-                        (
-                            rec_utc,
-                            lon_dt,
-                            BATCH_ID_CLOUD,
-                            did,
-                            str(meta.get("district_name") or did),
-                            str(meta.get("zone_type") or "urban"),
-                            dom,
-                            val,
-                            val,
-                            val,
-                            1,
-                            str(m.get("status") or "normal"),
-                            int(m.get("tfl_disruptions") or 0) if dom == "traffic" else 0,
-                        )
-                    )
-
-            cloud_exact_ts.add((rec_utc, dom))
-            cloud_hours.setdefault(hour_key, set()).add(dom)
-            synced_snapshot_ids.add(str(snap.get("snapshot_id") or rec_utc.isoformat()))
-            last_cloud_ts = lon_dt.isoformat()
-
-    upgrade_api_hours: list[tuple[datetime, datetime, str]] = []
-    for h_key, dom in sorted(upgrade_keys):
-        h_start = datetime.strptime(h_key, "%Y-%m-%dT%H:%M")
-        upgrade_api_hours.append((h_start, h_start + timedelta(hours=1), dom))
-
-    return (
-        domain_rows,
-        district_rows,
-        upgrade_api_hours,
-        {
-            "cloud_snapshots_synced": len(synced_snapshot_ids),
-            "upgraded_hour_domains": len(upgrade_api_hours),
-            "last_cloud_snapshot_at": last_cloud_ts,
-        },
-    )
-
-
 async def _build_api_backfill_rows(
     *,
     start_date: date,
@@ -567,7 +261,6 @@ async def _build_api_backfill_rows(
 ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], dict[str, Any]]:
     """Fill remaining missing completed hours using official historical Open APIs."""
     live_hours: dict[str, set[str]] = coverage["live_hours"]
-    cloud_hours: dict[str, set[str]] = coverage["cloud_hours"]
     api_hours: dict[str, set[str]] = coverage["api_hours"]
 
     current_hour_floor = now_lon.replace(minute=0, second=0, microsecond=0, tzinfo=None)
@@ -585,7 +278,7 @@ async def _build_api_backfill_rows(
         if h_dt >= current_hour_floor:
             continue
 
-        covered = live_hours.get(h_key, set()) | cloud_hours.get(h_key, set()) | api_hours.get(h_key, set())
+        covered = live_hours.get(h_key, set()) | api_hours.get(h_key, set())
         needed = {d for d in target_domains if d not in covered}
         if needed:
             missing_by_hour[h_key] = needed
@@ -885,13 +578,13 @@ async def sync_missing_to_mssql(
     http_client: httpx.AsyncClient | None = None,
     now_london_override: datetime | None = None,
 ) -> dict[str, Any]:
-    """Synchronize missing past hours from 24/7 Cloud Collector & official APIs into MSSQL."""
+    """Synchronize missing past hours from official historical Open APIs into MSSQL."""
     cfg = backfill_settings()
     eff_allow_traffic_model = (
         cfg["allow_traffic_model"] if allow_traffic_model is None else bool(allow_traffic_model)
     )
-    if source_mode not in ("auto", "cloud_only", "api_only"):
-        raise ValueError("source_mode must be one of: auto, cloud_only, api_only")
+    if source_mode not in ("auto", "api_only"):
+        raise ValueError("source_mode must be one of: auto, api_only")
 
     m_cfg = mssql_config()
     if not m_cfg["enabled"] or pymssql is None:
@@ -935,65 +628,26 @@ async def sync_missing_to_mssql(
                 return result
 
             districts = load_districts_metadata(metadata_path)
-            districts_by_id = {str(d["district_id"]): d for d in districts}
-
             coverage = await asyncio.to_thread(_inspect_existing_mssql_coverage, window_start_lon, window_end_lon)
 
-            cloud_dom_rows: list[tuple[Any, ...]] = []
-            cloud_dist_rows: list[tuple[Any, ...]] = []
-            upgrade_api_hours: list[tuple[datetime, datetime, str]] = []
-            cloud_fetch_stats: dict[str, Any] = {"local_files_read": 0, "remote_files_read": 0, "snapshots_loaded": 0}
-            cloud_build_stats: dict[str, Any] = {
-                "cloud_snapshots_synced": 0,
-                "upgraded_hour_domains": 0,
-                "last_cloud_snapshot_at": None,
-            }
+            api_dom_rows, api_dist_rows, api_stats = await _build_api_backfill_rows(
+                start_date=s_date,
+                end_date=e_date,
+                window_start_lon=window_start_lon,
+                window_end_lon=window_end_lon,
+                now_lon=now_lon,
+                districts=districts,
+                coverage=coverage,
+                include_districts=include_districts,
+                allow_traffic_model=eff_allow_traffic_model,
+                http_client=http_client,
+            )
 
-            if source_mode in ("auto", "cloud_only"):
-                snapshots, cloud_fetch_stats = await fetch_cloud_snapshots(
-                    s_date,
-                    e_date,
-                    window_start_lon=window_start_lon,
-                    window_end_lon=window_end_lon,
-                    http_client=http_client,
-                    settings=cfg,
-                )
-                if snapshots:
-                    cloud_dom_rows, cloud_dist_rows, upgrade_api_hours, cloud_build_stats = _build_cloud_rows(
-                        snapshots=snapshots,
-                        districts_by_id=districts_by_id,
-                        coverage=coverage,
-                        include_districts=include_districts,
-                        allow_traffic_model=eff_allow_traffic_model,
-                    )
-
-            api_dom_rows: list[tuple[Any, ...]] = []
-            api_dist_rows: list[tuple[Any, ...]] = []
-            api_stats: dict[str, Any] = {"api_hours_filled": 0, "api_sources_used": []}
-
-            if source_mode in ("auto", "api_only"):
-                api_dom_rows, api_dist_rows, api_stats = await _build_api_backfill_rows(
-                    start_date=s_date,
-                    end_date=e_date,
-                    window_start_lon=window_start_lon,
-                    window_end_lon=window_end_lon,
-                    now_lon=now_lon,
-                    districts=districts,
-                    coverage=coverage,
-                    include_districts=include_districts,
-                    allow_traffic_model=eff_allow_traffic_model,
-                    http_client=http_client,
-                )
-
-            all_dom_rows = cloud_dom_rows + api_dom_rows
-            all_dist_rows = cloud_dist_rows + api_dist_rows
-
-            if all_dom_rows or all_dist_rows or upgrade_api_hours:
+            if api_dom_rows or api_dist_rows:
                 await asyncio.to_thread(
                     _write_backfill_rows,
-                    domain_rows=all_dom_rows,
-                    district_rows=all_dist_rows,
-                    upgrade_api_hours=upgrade_api_hours,
+                    domain_rows=api_dom_rows,
+                    district_rows=api_dist_rows,
                 )
 
             result = {
@@ -1008,28 +662,21 @@ async def sync_missing_to_mssql(
                     "window_start_london": window_start_lon.isoformat(),
                     "window_end_london": window_end_lon.isoformat(),
                 },
-                "cloud_snapshots_loaded": cloud_fetch_stats["snapshots_loaded"],
-                "cloud_snapshots_synced": cloud_build_stats["cloud_snapshots_synced"],
-                "cloud_files_read": cloud_fetch_stats["local_files_read"] + cloud_fetch_stats["remote_files_read"],
-                "upgraded_hour_domains": cloud_build_stats["upgraded_hour_domains"],
-                "last_cloud_snapshot_at": cloud_build_stats["last_cloud_snapshot_at"],
                 "api_hours_filled": api_stats["api_hours_filled"],
                 "api_sources_used": api_stats["api_sources_used"],
-                "domain_rows_inserted": len(all_dom_rows),
-                "district_rows_inserted": len(all_dist_rows),
-                "total_rows_inserted": len(all_dom_rows) + len(all_dist_rows),
+                "domain_rows_inserted": len(api_dom_rows),
+                "district_rows_inserted": len(api_dist_rows),
+                "total_rows_inserted": len(api_dom_rows) + len(api_dist_rows),
             }
             _BACKFILL_STATUS["last_run_at"] = datetime.now(timezone.utc).isoformat()
             _BACKFILL_STATUS["last_result"] = result
 
             logger.info(
-                "MSSQL sync [%s] done (%s..%s) | cloud_snaps=%d | api_hours=%d | upgraded=%d | inserted=%d rows (%d dom + %d dist)",
+                "MSSQL backfill [%s] done (%s..%s) | api_hours=%d | inserted=%d rows (%d dom + %d dist)",
                 trigger,
                 s_date.isoformat(),
                 e_date.isoformat(),
-                result["cloud_snapshots_synced"],
                 result["api_hours_filled"],
-                result["upgraded_hour_domains"],
                 result["total_rows_inserted"],
                 result["domain_rows_inserted"],
                 result["district_rows_inserted"],
