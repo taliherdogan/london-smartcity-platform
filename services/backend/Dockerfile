@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py history_service.py mssql_reader.py ./
+COPY main.py history_service.py mssql_reader.py backfill_service.py ./
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
