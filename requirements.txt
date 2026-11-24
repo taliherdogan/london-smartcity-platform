@@ -1,0 +1,20 @@
+# Proje 15 — Python Bağımlılıkları (Genel Proje Özeti)
+# Not: Her mikroservis kendi minimal Dockerfile & requirements.txt dosyasıyla izole çalışır.
+
+# Stream Ingestion & API Polling
+confluent-kafka==2.6.1
+httpx==0.28.1
+redis==5.2.0
+numpy==1.26.4
+
+# Distributed Stream & Batch Processing
+pyspark==3.5.3
+
+# Backend WebSocket & REST API
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# Benchmarking & Visualization
+matplotlib==3.9.4
+psutil==6.1.1

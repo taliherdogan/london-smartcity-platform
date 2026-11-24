@@ -1,0 +1,124 @@
+{
+  "generated_at": "2026-11-23T16:07:46.476368+00:00",
+  "city": "London, United Kingdom",
+  "format_experiments": [
+    {
+      "rows": 100000,
+      "scale_label": "100K Kayıt",
+      "partitions": 8,
+      "csv": {
+        "write_time_sec": 4.187,
+        "query_time_sec": 3.561,
+        "disk_size_mb": 7.7,
+        "skipped": false
+      },
+      "parquet": {
+        "write_time_sec": 2.206,
+        "query_time_sec": 1.621,
+        "disk_size_mb": 1.74
+      },
+      "disk_savings_pct": 77.4,
+      "query_speedup_x": 2.2,
+      "driver_rss_mb": 1328.4
+    },
+    {
+      "rows": 1000000,
+      "scale_label": "1M Kayıt",
+      "partitions": 8,
+      "csv": {
+        "write_time_sec": 1.806,
+        "query_time_sec": 1.193,
+        "disk_size_mb": 77.98,
+        "skipped": false
+      },
+      "parquet": {
+        "write_time_sec": 1.381,
+        "query_time_sec": 0.747,
+        "disk_size_mb": 14.07
+      },
+      "disk_savings_pct": 82.0,
+      "query_speedup_x": 1.6,
+      "driver_rss_mb": 1817.0
+    },
+    {
+      "rows": 5000000,
+      "scale_label": "5M Kayıt",
+      "partitions": 13,
+      "csv": {
+        "write_time_sec": 5.951,
+        "query_time_sec": 2.734,
+        "disk_size_mb": 394.17,
+        "skipped": false
+      },
+      "parquet": {
+        "write_time_sec": 5.159,
+        "query_time_sec": 0.987,
+        "disk_size_mb": 67.71
+      },
+      "disk_savings_pct": 82.8,
+      "query_speedup_x": 2.77,
+      "driver_rss_mb": 1622.8
+    },
+    {
+      "rows": 15000000,
+      "scale_label": "15M Kayıt",
+      "partitions": 38,
+      "csv": {
+        "write_time_sec": 34.17,
+        "query_time_sec": 12.454,
+        "disk_size_mb": 1189.48,
+        "skipped": false
+      },
+      "parquet": {
+        "write_time_sec": 12.653,
+        "query_time_sec": 1.718,
+        "disk_size_mb": 203.02
+      },
+      "disk_savings_pct": 82.9,
+      "query_speedup_x": 7.25,
+      "driver_rss_mb": 2088.1
+    }
+  ],
+  "streaming_experiments": [
+    {
+      "target_rate_eps": 100,
+      "batches_measured": 7,
+      "avg_throughput_eps": 99.3,
+      "avg_p50_latency_ms": 1092.0,
+      "avg_p95_latency_ms": 2068.6,
+      "avg_spark_batch_ms": 878.5
+    },
+    {
+      "target_rate_eps": 500,
+      "batches_measured": 7,
+      "avg_throughput_eps": 500.2,
+      "avg_p50_latency_ms": 1091.0,
+      "avg_p95_latency_ms": 2093.0,
+      "avg_spark_batch_ms": 597.0
+    },
+    {
+      "target_rate_eps": 2000,
+      "batches_measured": 7,
+      "avg_throughput_eps": 1999.9,
+      "avg_p50_latency_ms": 1057.4,
+      "avg_p95_latency_ms": 1959.1,
+      "avg_spark_batch_ms": 619.8
+    },
+    {
+      "target_rate_eps": 5000,
+      "batches_measured": 7,
+      "avg_throughput_eps": 4962.8,
+      "avg_p50_latency_ms": 1062.0,
+      "avg_p95_latency_ms": 1963.6,
+      "avg_spark_batch_ms": 650.0
+    },
+    {
+      "target_rate_eps": 10000,
+      "batches_measured": 7,
+      "avg_throughput_eps": 10004.9,
+      "avg_p50_latency_ms": 1098.7,
+      "avg_p95_latency_ms": 2000.1,
+      "avg_spark_batch_ms": 598.4
+    }
+  ]
+}
