@@ -73,7 +73,6 @@ REDIS_LATEST_KEY = "smartcity:latest_state"
 REDIS_TIMESERIES_KEY = "smartcity:timeseries"
 REDIS_ALERTS_KEY = "smartcity:alerts"
 REDIS_RATE_KEY = "smartcity:control:rate"
-REDIS_TELEMETRY_PREFIX = "smartcity:rate_telemetry:"
 REDIS_INFRA_SPARK_KEY = "smartcity:infra:spark"
 REDIS_STATE_SNAPSHOT_KEY = "smartcity:spark:state"
 RESET_STATE_ON_START = os.getenv("RESET_STATE_ON_START", "false").lower() in ("1", "true", "yes")
@@ -1038,19 +1037,6 @@ def main() -> None:
                     pipe.lpush(REDIS_ALERTS_KEY, json.dumps(al))
                 pipe.ltrim(REDIS_ALERTS_KEY, 0, 39)
 
-                rate_bucket_key = f"{REDIS_TELEMETRY_PREFIX}{target_rate}"
-                pipe.rpush(
-                    rate_bucket_key,
-                    json.dumps(
-                        {
-                            "throughput_eps": throughput_eps,
-                            "p50_latency_ms": p50_ms,
-                            "p95_latency_ms": p95_ms,
-                            "spark_batch_ms": batch_proc_ms,
-                        }
-                    ),
-                )
-                pipe.ltrim(rate_bucket_key, -30, -1)
                 pipe.set(
                     REDIS_INFRA_SPARK_KEY,
                     json.dumps(

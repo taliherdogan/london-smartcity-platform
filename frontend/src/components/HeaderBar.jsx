@@ -1,7 +1,6 @@
 import React, { memo } from 'react'
 import {
   Activity,
-  BarChart3,
   Gauge,
   History,
   MapPin,
@@ -23,13 +22,6 @@ const TABS = [
     icon: MapPin,
     activeIcon: 'text-emerald-600',
     activeRing: 'ring-emerald-200/80 text-emerald-700',
-  },
-  {
-    id: 'benchmarks',
-    label: 'Deneyler & Mimari',
-    icon: BarChart3,
-    activeIcon: 'text-violet-600',
-    activeRing: 'ring-violet-200/80 text-violet-700',
   },
   {
     id: 'history',

@@ -1,3 +1,0 @@
-redis==5.2.0
-matplotlib==3.7.5
-psutil==6.1.1

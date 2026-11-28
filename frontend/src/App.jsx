@@ -6,7 +6,6 @@ import LiveCharts from './components/LiveCharts'
 import AnomalyFeed from './components/AnomalyFeed'
 import DistrictView from './components/DistrictView'
 import HistoryView from './components/HistoryView'
-import BenchmarkView from './components/BenchmarkView'
 import { useLiveStream } from './hooks/useLiveStream'
 import { formatInt } from './utils/format'
 
@@ -97,14 +96,12 @@ export default function App() {
     liveState,
     sources,
     targetRate,
-    benchmarks,
     todaySummary,
     connected,
     isOffline,
     browserOffline,
     controlBusy,
     changeRate,
-    refreshBenchmarks,
   } = useLiveStream(activeTab)
 
   const perf = liveState?.performance || EMPTY_PERF
@@ -175,10 +172,6 @@ export default function App() {
 
         {activeTab === 'districts' && (
           <DistrictView districts={liveState?.districts} />
-        )}
-
-        {activeTab === 'benchmarks' && (
-          <BenchmarkView benchmarks={benchmarks} onRefresh={refreshBenchmarks} />
         )}
       </main>
     </div>

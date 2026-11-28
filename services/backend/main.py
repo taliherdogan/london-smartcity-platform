@@ -17,7 +17,6 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -54,7 +53,6 @@ logger = logging.getLogger("backend")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-BENCHMARK_RESULTS_DIR = Path(os.getenv("BENCHMARK_RESULTS_DIR", "/app/benchmark_results"))
 METADATA_PATH = os.getenv("METADATA_PATH", "/data/metadata/london_districts.json")
 LAKE_DIR = os.getenv("LAKE_DIR", "/data/lake")
 MAX_EVENT_RATE = int(os.getenv("MAX_EVENT_RATE", "25000"))
@@ -74,7 +72,6 @@ REDIS_LATEST_KEY = "smartcity:latest_state"
 REDIS_SOURCES_KEY = "smartcity:api_sources"
 REDIS_RATE_KEY = "smartcity:control:rate"
 REDIS_ANOMALY_KEY = "smartcity:control:anomaly"
-REDIS_TELEMETRY_PREFIX = "smartcity:rate_telemetry:"
 REDIS_INFRA_SPARK_KEY = "smartcity:infra:spark"
 REDIS_INFRA_GEN_KEY = "smartcity:infra:generator"
 REDIS_INTERNET_KEY = "smartcity:infra:internet"
@@ -163,7 +160,6 @@ history_http_client: httpx.AsyncClient | None = None
 pubsub_task: asyncio.Task[None] | None = None
 broadcaster_task: asyncio.Task[None] | None = None
 backfill_task: asyncio.Task[None] | None = None
-_benchmark_cache: tuple[float, dict[str, Any]] | None = None
 
 
 async def _clear_history_cache() -> int:
@@ -462,70 +458,6 @@ async def trigger_anomaly(req: AnomalyRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}") from exc
     logger.info("Triggered %ds test anomaly: domain=%s district=%s", req.duration_sec, req.domain, req.district_id)
     return {"ok": True, "anomaly": payload}
-
-
-@app.get("/api/benchmarks")
-async def get_benchmarks() -> dict[str, Any]:
-    global _benchmark_cache
-    r = _require_redis()
-    summary_file = BENCHMARK_RESULTS_DIR / "benchmark_summary.json"
-    summary: dict[str, Any] = {}
-    has_file = summary_file.exists()
-    if has_file:
-        try:
-            mtime = summary_file.stat().st_mtime
-            if _benchmark_cache is not None and _benchmark_cache[0] == mtime:
-                summary = _benchmark_cache[1]
-            else:
-                summary = json.loads(summary_file.read_text(encoding="utf-8"))
-                _benchmark_cache = (mtime, summary)
-        except Exception as exc:
-            logger.warning("Failed reading benchmark_summary.json: %s", exc)
-
-    # Dynamically discover all recorded streaming rate buckets and fetch in parallel
-    live_rates: list[dict[str, Any]] = []
-    try:
-        discovered_rates: set[int] = {100, 500, 2000, 5000}
-        async for key in r.scan_iter(match=f"{REDIS_TELEMETRY_PREFIX}*"):
-            suffix = key.removeprefix(REDIS_TELEMETRY_PREFIX)
-            if suffix.isdigit():
-                discovered_rates.add(int(suffix))
-
-        sorted_rates = sorted(discovered_rates)
-        all_entries = await asyncio.gather(
-            *(r.lrange(f"{REDIS_TELEMETRY_PREFIX}{rate}", 0, -1) for rate in sorted_rates)
-        )
-        for rate, entries in zip(sorted_rates, all_entries):
-            if entries:
-                parsed: list[dict[str, Any]] = []
-                for x in entries:
-                    try:
-                        obj = json.loads(x)
-                        if isinstance(obj, dict) and "throughput_eps" in obj:
-                            parsed.append(obj)
-                    except Exception:
-                        continue
-                count = len(parsed)
-                if count == 0:
-                    continue
-                live_rates.append(
-                    {
-                        "target_rate_eps": rate,
-                        "samples": count,
-                        "avg_throughput_eps": round(sum(float(p["throughput_eps"]) for p in parsed) / count, 1),
-                        "avg_p50_latency_ms": round(sum(float(p.get("p50_latency_ms", 0.0)) for p in parsed) / count, 1),
-                        "avg_p95_latency_ms": round(sum(float(p.get("p95_latency_ms", 0.0)) for p in parsed) / count, 1),
-                        "avg_spark_batch_ms": round(sum(float(p.get("spark_batch_ms", 0.0)) for p in parsed) / count, 1),
-                    }
-                )
-    except Exception as exc:
-        logger.warning("Failed reading live rate telemetry from Redis: %s", exc)
-
-    return {
-        "has_benchmark_file": has_file,
-        "benchmark_summary": summary,
-        "live_streaming_telemetry": live_rates,
-    }
 
 
 @app.get("/api/districts")

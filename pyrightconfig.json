@@ -1,13 +1,11 @@
 {
   "include": [
-    "services",
-    "benchmarks"
+    "services"
   ],
   "extraPaths": [
     "services/generator",
     "services/spark_processor",
-    "services/backend",
-    "benchmarks"
+    "services/backend"
   ],
   "typeCheckingMode": "basic",
   "reportMissingImports": true

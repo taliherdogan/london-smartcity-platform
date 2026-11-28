@@ -225,7 +225,6 @@ services:
       MSSQL_AUTO_BACKFILL_ENABLED: ${MSSQL_AUTO_BACKFILL_ENABLED:-true}
       MSSQL_AUTO_BACKFILL_HOURS: ${MSSQL_AUTO_BACKFILL_HOURS:-72}
       MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL: ${MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL:-false}
-      BENCHMARK_RESULTS_DIR: /app/benchmark_results
       METADATA_PATH: /data/metadata/london_districts.json
       LAKE_DIR: /data/lake
       MAX_EVENT_RATE: ${MAX_EVENT_RATE:-25000}
@@ -233,7 +232,6 @@ services:
       WS_SEND_TIMEOUT_SEC: 2.0
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173}
     volumes:
-      - ./benchmarks/results:/app/benchmark_results
       - ./data/metadata:/data/metadata:ro
       - lake_data:/data/lake:ro
     mem_limit: 512m
@@ -263,39 +261,9 @@ services:
     networks:
       - smartcity-net
 
-  benchmark:
-    build:
-      context: ./benchmarks
-      dockerfile: Dockerfile
-    container_name: smartcity-benchmark
-    profiles: ["benchmark"]
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      RESULTS_DIR: /app/results
-      METADATA_PATH: /data/metadata/london_districts.json
-      SPARK_MASTER: ${BENCHMARK_SPARK_MASTER:-local[4]}
-      SPARK_DRIVER_MEMORY: ${BENCHMARK_DRIVER_MEMORY:-3g}
-      BENCHMARK_SCALES: ${BENCHMARK_SCALES:-100000,1000000,5000000}
-      BENCHMARK_STREAM_RATES: ${BENCHMARK_STREAM_RATES:-100,500,2000,5000}
-    volumes:
-      - ./benchmarks/results:/app/results
-      - ./data/metadata:/data/metadata:ro
-      - benchmark_tmp:/tmp/benchmark_lake
-    mem_limit: 4096m
-    logging: *default-logging
-    networks:
-      - smartcity-net
-
 volumes:
   lake_data:
   spark_spill:
-  benchmark_tmp:
   redis_data:
   mssql_data:
 

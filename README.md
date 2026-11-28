@@ -53,12 +53,6 @@ docker compose up -d --build
   - **Database:** `SmartCityDB` (`dbo.alan_ozetleri`, `dbo.bolge_olcumleri`, `dbo.anomali_uyarilari`, `dbo.batch_telemetri`, `dbo.platform_durumu`, `dbo.vw_saatlik_sehir_ozeti`, `dbo.vw_son_bolge_durumu`, `dbo.vw_son_uyarilar` — tüm tablo, görünüm ve sütunlar Türkçe ASCII `snake_case` standardındadır)
   - **Önemli:** Container'ları yeniden oluştururken verileri korumak için `docker compose down` / `docker compose up -d --build` kullanın; volume'ları silen `docker compose down -v` komutunu kullanmayın.
 
-### Çok Ölçekli Batch (CSV vs Parquet) & Çok Hızlı Streaming Benchmark
-```powershell
-docker compose --profile benchmark run --rm --build benchmark
-```
-> Varsayılan ölçekler (`BENCHMARK_SCALES=100000,1000000,5000000`) ve akış hızları (`BENCHMARK_STREAM_RATES=100,500,2000,5000`) `.env` üzerinden 15M+ kayıt ve 10.000+ ev/sn'ye kadar genişletilebilir.
-
 ### Otomatik Testler
 ```powershell
 pytest -v

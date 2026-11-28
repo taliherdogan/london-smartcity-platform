@@ -7,7 +7,6 @@ export function useLiveStream(activeTab = 'live') {
   const [sources, setSources] = useState({})
   const [targetRate, setTargetRate] = useState(10)
   const [activeAnomaly, setActiveAnomaly] = useState(null)
-  const [benchmarks, setBenchmarks] = useState(null)
   const [todaySummary, setTodaySummary] = useState(null)
   const [connected, setConnected] = useState(false)
   const [browserOffline, setBrowserOffline] = useState(
@@ -62,17 +61,6 @@ export function useLiveStream(activeTab = 'live') {
     }
   }, [])
 
-  const fetchBenchmarks = useCallback(async () => {
-    try {
-      const benchRes = await fetch('/api/benchmarks')
-      if (!benchRes.ok) return
-      const b = await benchRes.json()
-      startTransition(() => setBenchmarks(b))
-    } catch {
-      // retry silently on next refresh
-    }
-  }, [])
-
   const fetchTodaySummary = useCallback(async () => {
     if (document.hidden) return
     try {
@@ -87,15 +75,9 @@ export function useLiveStream(activeTab = 'live') {
     }
   }, [])
 
-  const refreshBenchmarks = useCallback(async () => {
-    await Promise.all([fetchSources(), fetchBenchmarks()])
-  }, [fetchSources, fetchBenchmarks])
-
-  // Refresh benchmark data when entering the benchmarks tab, and flush buffered live frame when returning to live/districts
+  // Flush buffered live frame when returning to live/districts
   useEffect(() => {
-    if (activeTab === 'benchmarks') {
-      fetchBenchmarks()
-    } else if (
+    if (
       !isOfflineRef.current &&
       (activeTab === 'live' || activeTab === 'districts') &&
       pendingRawFrameRef.current &&
@@ -103,7 +85,7 @@ export function useLiveStream(activeTab = 'live') {
     ) {
       flushFnRef.current()
     }
-  }, [activeTab, fetchBenchmarks])
+  }, [activeTab])
 
   useEffect(() => {
     let unmounted = false
@@ -126,7 +108,6 @@ export function useLiveStream(activeTab = 'live') {
       .catch(() => {})
 
     fetchSources()
-    fetchBenchmarks()
     fetchTodaySummary()
     const metaTimer = setInterval(fetchSources, 5000)
     const todayTimer = setInterval(fetchTodaySummary, 300000)
@@ -135,8 +116,8 @@ export function useLiveStream(activeTab = 'live') {
       rafIdRef.current = null
       throttleTimerRef.current = null
       if (unmounted || document.hidden || isOfflineRef.current) return
-      // Avoid parsing & re-rendering live stream frames while viewing History or Benchmarks
-      if (activeTabRef.current === 'history' || activeTabRef.current === 'benchmarks') return
+      // Avoid parsing & re-rendering live stream frames while viewing History
+      if (activeTabRef.current === 'history') return
 
       const raw = pendingRawFrameRef.current
       pendingRawFrameRef.current = null
@@ -162,7 +143,7 @@ export function useLiveStream(activeTab = 'live') {
 
     const scheduleFlush = () => {
       if (unmounted || document.hidden || isOfflineRef.current) return
-      if (activeTabRef.current === 'history' || activeTabRef.current === 'benchmarks') return
+      if (activeTabRef.current === 'history') return
       if (rafIdRef.current !== null || throttleTimerRef.current !== null) return
 
       const elapsed = performance.now() - lastCommitMsRef.current
@@ -239,7 +220,7 @@ export function useLiveStream(activeTab = 'live') {
       if (rafIdRef.current !== null) window.cancelAnimationFrame(rafIdRef.current)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [fetchSources, fetchBenchmarks, fetchTodaySummary])
+  }, [fetchSources, fetchTodaySummary])
 
   const changeRate = useCallback(async (rate) => {
     const prevRate = targetRateRef.current
@@ -290,7 +271,6 @@ export function useLiveStream(activeTab = 'live') {
     sources,
     targetRate,
     activeAnomaly,
-    benchmarks,
     todaySummary,
     connected,
     isOffline,
@@ -299,6 +279,5 @@ export function useLiveStream(activeTab = 'live') {
     controlBusy,
     changeRate,
     injectAnomaly,
-    refreshBenchmarks,
   }
 }
