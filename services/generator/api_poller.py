@@ -12,6 +12,7 @@ Sources (all free, zero API key required):
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -414,6 +415,11 @@ def poll_all_sources(
 ) -> dict[str, dict[str, Any]]:
     """Fetch all London open APIs with graceful fallback to previous/default baselines."""
     baselines = dict(previous) if previous else default_baselines()
+    defaults = default_baselines()
+    for dom_key, def_entry in defaults.items():
+        if dom_key not in baselines:
+            baselines[dom_key] = def_entry
+
     fetchers = {
         "weather": fetch_weather,
         "air_quality": fetch_air_quality,
@@ -421,7 +427,7 @@ def poll_all_sources(
         "energy": fetch_energy,
     }
 
-    with httpx.Client(timeout=12.0, follow_redirects=True) as client:
+    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
         for domain, fn in fetchers.items():
             try:
                 baselines[domain] = fn(client, districts)

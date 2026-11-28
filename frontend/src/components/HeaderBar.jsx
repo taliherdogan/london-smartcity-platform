@@ -6,6 +6,7 @@ import {
   History,
   MapPin,
   Radio,
+  WifiOff,
 } from 'lucide-react'
 
 const TABS = [
@@ -40,14 +41,15 @@ const TABS = [
 ]
 
 const RATES = [
-  { value: 100, label: '100/sn', tag: 'Standart' },
-  { value: 200, label: '200/sn', tag: 'Yüksek' },
+  { value: 10, label: '10/sn', tag: 'Standart' },
+  { value: 100, label: '100/sn', tag: 'Yüksek' },
 ]
 
 function HeaderBar({
   activeTab,
   onTabChange,
   connected,
+  isOffline = false,
   targetRate,
   onRateChange,
   controlBusy,
@@ -68,25 +70,32 @@ function HeaderBar({
               <h1 className="bg-gradient-to-r from-slate-900 via-slate-800 to-blue-900 bg-clip-text text-base font-extrabold tracking-tight text-transparent sm:text-lg">
                 Londra Akıllı Şehir
               </h1>
-              <span
-                className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-bold ${
-                  connected
-                    ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/90'
-                    : 'bg-amber-50 text-amber-700 ring-1 ring-amber-200/90'
-                }`}
-              >
-                <span className="relative flex h-2 w-2">
-                  {connected && (
-                    <span className="live-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400" />
-                  )}
-                  <span
-                    className={`relative inline-flex h-2 w-2 rounded-full ${
-                      connected ? 'bg-emerald-500' : 'bg-amber-500'
-                    }`}
-                  />
+              {isOffline ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-bold text-rose-700 ring-1 ring-rose-200/90">
+                  <WifiOff className="h-3 w-3" />
+                  Çevrimdışı
                 </span>
-                {connected ? 'Canlı' : 'Bağlanıyor'}
-              </span>
+              ) : (
+                <span
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                    connected
+                      ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/90'
+                      : 'bg-amber-50 text-amber-700 ring-1 ring-amber-200/90'
+                  }`}
+                >
+                  <span className="relative flex h-2 w-2">
+                    {connected && (
+                      <span className="live-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400" />
+                    )}
+                    <span
+                      className={`relative inline-flex h-2 w-2 rounded-full ${
+                        connected ? 'bg-emerald-500' : 'bg-amber-500'
+                      }`}
+                    />
+                  </span>
+                  {connected ? 'Canlı' : 'Bağlanıyor'}
+                </span>
+              )}
             </div>
             <p
               className="text-[11px] font-medium text-slate-500"

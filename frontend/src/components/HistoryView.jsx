@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -13,10 +13,8 @@ import {
   AlertCircle,
   Calendar,
   Car,
-  CheckCircle2,
   ChevronDown,
   ChevronUp,
-  CloudDownload,
   CloudRain,
   CloudSun,
   Database,
@@ -32,10 +30,52 @@ import {
   Wind,
   Zap,
 } from 'lucide-react'
-import { formatInt } from '../utils/format'
+import { computeNiceYAxis, formatAxisTick, formatInt } from '../utils/format'
 
-const CHART_MARGIN = { top: 8, right: 10, left: -14, bottom: 0 }
+const CHART_MARGIN = { top: 8, right: 10, left: 0, bottom: 0 }
 const AXIS_TICK = { fontSize: 10, fill: '#94a3b8', fontWeight: 500 }
+const EMPTY_OBJ = {}
+const EMPTY_ARR = []
+const MAX_CHART_POINTS = 168
+const INITIAL_TABLE_ROWS = 72
+const CLIENT_CACHE_TTL_MS = 5 * 60 * 1000
+const CLIENT_CACHE_MAX = 40
+
+// Module-level caches so revisiting presets/districts or switching tabs is instant
+const historyClientCache = new Map()
+let cachedDistrictOptions = null
+
+function getCachedHistory(key) {
+  const entry = historyClientCache.get(key)
+  if (!entry) return null
+  if (Date.now() > entry.expiresAt) {
+    historyClientCache.delete(key)
+    return null
+  }
+  // Refresh LRU recency
+  historyClientCache.delete(key)
+  historyClientCache.set(key, entry)
+  return entry.data
+}
+
+function setCachedHistory(key, data) {
+  if (historyClientCache.has(key)) historyClientCache.delete(key)
+  historyClientCache.set(key, { data, expiresAt: Date.now() + CLIENT_CACHE_TTL_MS })
+  if (historyClientCache.size > CLIENT_CACHE_MAX) {
+    const oldestKey = historyClientCache.keys().next().value
+    historyClientCache.delete(oldestKey)
+  }
+}
+
+function downsampleSeries(series, maxPoints) {
+  if (!series || series.length <= maxPoints) return series
+  const step = (series.length - 1) / (maxPoints - 1)
+  const out = new Array(maxPoints)
+  for (let i = 0; i < maxPoints; i += 1) {
+    out[i] = series[Math.round(i * step)]
+  }
+  return out
+}
 
 function isoDateDaysAgo(daysAgo) {
   const d = new Date()
@@ -76,8 +116,9 @@ const DOMAIN_CONFIGS = [
     cursor: { stroke: '#2563EB', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#2563EB', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: true,
+    axisOpts: { minSpan: 2, minStep: 0.5, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(0),
     getLevel: (v) => {
       if (v < 14) return { label: 'Çok Yoğun', badge: 'bg-rose-100 text-rose-700', bar: 'bg-rose-500' }
       if (v < 22) return { label: 'Yoğun', badge: 'bg-amber-100 text-amber-800', bar: 'bg-amber-500' }
@@ -117,8 +158,9 @@ const DOMAIN_CONFIGS = [
     cursor: { stroke: '#0891B2', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#0891B2', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: null,
+    axisOpts: { minSpan: 1.5, minStep: 0.5, allowNegative: true },
+    axisSuffix: '°',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(1),
     getLevel: (v) => {
       if (v <= 4) return { label: 'Soğuk', badge: 'bg-blue-100 text-blue-700', bar: 'bg-blue-500' }
       if (v <= 13) return { label: 'Serin', badge: 'bg-cyan-100 text-cyan-800', bar: 'bg-cyan-500' }
@@ -160,8 +202,9 @@ const DOMAIN_CONFIGS = [
     cursor: { stroke: '#059669', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#059669', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: false,
+    axisOpts: { minSpan: 4, minStep: 1, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(0),
     getLevel: (v) => {
       if (v <= 20) return { label: 'İyi', badge: 'bg-emerald-100 text-emerald-700', bar: 'bg-emerald-500' }
       if (v <= 40) return { label: 'Makul', badge: 'bg-emerald-100 text-emerald-700', bar: 'bg-teal-500' }
@@ -201,8 +244,9 @@ const DOMAIN_CONFIGS = [
     cursor: { stroke: '#D97706', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#D97706', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: false,
+    axisOpts: { minSpan: 15, minStep: 5, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => formatInt(v),
-    formatAxis: (v) => `${Math.round(Number(v))}`,
     getLevel: (v) => {
       if (v >= 195) return { label: 'Yüksek Yük', badge: 'bg-orange-100 text-orange-800', bar: 'bg-orange-500' }
       if (v >= 130) return { label: 'Normal Yük', badge: 'bg-amber-100 text-amber-800', bar: 'bg-amber-500' }
@@ -222,27 +266,6 @@ const DOMAIN_CONFIGS = [
     },
   },
 ]
-
-function sourceBadgeStyle(sourceType) {
-  if (sourceType === 'lake') {
-    return 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200/80'
-  }
-  if (sourceType === 'hybrid') {
-    return 'bg-violet-50 text-violet-700 ring-1 ring-violet-200/80'
-  }
-  if (sourceType === 'api') {
-    return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/80'
-  }
-  return 'bg-slate-100 text-slate-600 ring-1 ring-slate-200/80'
-}
-
-function sourceShortLabel(sourceType, key) {
-  if (sourceType === 'lake') return 'Data Lake'
-  if (sourceType === 'hybrid') return 'Lake + API'
-  if (sourceType === 'api') return 'Gerçek Arşiv API'
-  if (key === 'traffic') return 'TfL Model + Hava'
-  return 'Referans Model'
-}
 
 function HistoryTooltip({ active, payload, cfg, avg }) {
   if (!active || !payload?.length) return null
@@ -316,12 +339,19 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
     }
     if (count === 0) return null
     const avg = sum / count
-    const span = max - min
-    const pad = span > 0 ? span * 0.2 : Math.max(Math.abs(avg) * 0.05, 0.5)
-    return { min, max, avg, domain: [min - pad, max + pad] }
-  }, [series, cfg.key])
+    const yAxis = computeNiceYAxis(min, max, cfg.axisOpts)
+    return { min, max, avg, domain: yAxis.domain, ticks: yAxis.ticks, decimals: yAxis.decimals }
+  }, [series, cfg.key, cfg.axisOpts])
 
-  const srcType = domainSummary?.source_type || 'model'
+  const chartSeries = useMemo(
+    () => downsampleSeries(series, MAX_CHART_POINTS),
+    [series]
+  )
+
+  const tooltipContent = useMemo(
+    () => <HistoryTooltip cfg={cfg} avg={chartStats?.avg} />,
+    [cfg, chartStats?.avg]
+  )
 
   return (
     <div className="perf-card relative flex flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-4 shadow-sm transition-shadow duration-200 hover:shadow-md">
@@ -349,12 +379,6 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
               </span>
               <span className="text-[10px] font-bold text-slate-400">{cfg.unit}</span>
             </div>
-            <span
-              className={`mt-0.5 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold ${sourceBadgeStyle(srcType)}`}
-              title={domainSummary?.source}
-            >
-              {sourceShortLabel(srcType, cfg.key)}
-            </span>
           </div>
         )}
       </div>
@@ -366,7 +390,7 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={series} margin={CHART_MARGIN}>
+            <AreaChart data={chartSeries} margin={CHART_MARGIN}>
               <defs>
                 <linearGradient id={cfg.gradId} x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={cfg.color} stopOpacity={0.28} />
@@ -383,16 +407,17 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
                 minTickGap={26}
               />
               <YAxis
+                width={40}
                 tick={AXIS_TICK}
                 tickLine={false}
                 axisLine={false}
-                tickCount={4}
-                tickFormatter={cfg.formatAxis}
+                ticks={chartStats.ticks}
+                tickFormatter={(v) => formatAxisTick(v, chartStats.decimals, cfg.axisSuffix)}
                 domain={chartStats.domain}
               />
               <Tooltip
                 isAnimationActive={false}
-                content={<HistoryTooltip cfg={cfg} avg={chartStats.avg} />}
+                content={tooltipContent}
                 cursor={cfg.cursor}
               />
               <ReferenceLine
@@ -424,18 +449,12 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
               <strong className="font-mono font-bold text-slate-700 tabular-nums">
                 {cfg.formatVal(chartStats.min)}
               </strong>
-              {domainSummary?.min_time && (
-                <span className="ml-1 text-[10px] text-slate-400">({domainSummary.min_time})</span>
-              )}
             </span>
             <span>
               En Yüksek:{' '}
               <strong className="font-mono font-bold text-slate-700 tabular-nums">
                 {cfg.formatVal(chartStats.max)}
               </strong>
-              {domainSummary?.max_time && (
-                <span className="ml-1 text-[10px] text-slate-400">({domainSummary.max_time})</span>
-              )}
             </span>
           </div>
           <span className="font-mono text-[10px] font-semibold text-slate-400">
@@ -447,7 +466,7 @@ const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSum
   )
 })
 
-function HistoryView({ liveDistricts = [] }) {
+function HistoryView() {
   const todayStr = useMemo(() => isoDateDaysAgo(0), [])
   const minDateStr = useMemo(() => isoDateDaysAgo(365), [])
 
@@ -457,24 +476,25 @@ function HistoryView({ liveDistricts = [] }) {
   const [startDate, setStartDate] = useState(() => isoDateDaysAgo(7))
   const [endDate, setEndDate] = useState(() => isoDateDaysAgo(1))
   const [districtId, setDistrictId] = useState('all')
-  const [granularity, setGranularity] = useState('auto')
+  const [granularity, setGranularity] = useState('hourly')
 
-  const [districtOptions, setDistrictOptions] = useState([])
+  const [districtOptions, setDistrictOptions] = useState(() => cachedDistrictOptions || EMPTY_ARR)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [syncing, setSyncing] = useState(false)
-  const [syncNotice, setSyncNotice] = useState(null)
   const [showTable, setShowTable] = useState(false)
+  const [visibleTableRows, setVisibleTableRows] = useState(INITIAL_TABLE_ROWS)
   const abortRef = useRef(null)
 
-  // Fetch 32 London boroughs once (fallback to liveDistricts if already loaded)
+  // Fetch 32 London boroughs once per session
   useEffect(() => {
+    if (cachedDistrictOptions && cachedDistrictOptions.length > 0) return
     let cancelled = false
     fetch('/api/districts')
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (!cancelled && res?.districts?.length) {
+          cachedDistrictOptions = res.districts
           setDistrictOptions(res.districts)
         }
       })
@@ -484,16 +504,33 @@ function HistoryView({ liveDistricts = [] }) {
     }
   }, [])
 
-  const districtsList = useMemo(() => {
-    if (districtOptions.length > 0) return districtOptions
-    return liveDistricts.map((d) => ({
-      district_id: d.district_id,
-      district_name: d.district_name,
-    }))
-  }, [districtOptions, liveDistricts])
-
   const loadHistory = useCallback(
     async ({ forceRefresh = false } = {}) => {
+      const params = new URLSearchParams()
+      if (mode === 'single') {
+        params.set('date', singleDate)
+      } else {
+        params.set('start_date', startDate)
+        params.set('end_date', endDate)
+      }
+      params.set('district_id', districtId)
+      params.set('granularity', granularity)
+      const cacheKey = params.toString()
+
+      if (!forceRefresh) {
+        const cached = getCachedHistory(cacheKey)
+        if (cached) {
+          if (abortRef.current) abortRef.current.abort()
+          setError(null)
+          setLoading(false)
+          startTransition(() => {
+            setData(cached)
+            setVisibleTableRows(INITIAL_TABLE_ROWS)
+          })
+          return
+        }
+      }
+
       if (abortRef.current) abortRef.current.abort()
       const controller = new AbortController()
       abortRef.current = controller
@@ -501,15 +538,6 @@ function HistoryView({ liveDistricts = [] }) {
       setLoading(true)
       setError(null)
       try {
-        const params = new URLSearchParams()
-        if (mode === 'single') {
-          params.set('date', singleDate)
-        } else {
-          params.set('start_date', startDate)
-          params.set('end_date', endDate)
-        }
-        params.set('district_id', districtId)
-        params.set('granularity', granularity)
         if (forceRefresh) params.set('refresh', 'true')
 
         const resp = await fetch(`/api/history?${params.toString()}`, {
@@ -526,7 +554,11 @@ function HistoryView({ liveDistricts = [] }) {
           throw new Error(detail)
         }
         const json = await resp.json()
-        setData(json)
+        setCachedHistory(cacheKey, json)
+        startTransition(() => {
+          setData(json)
+          setVisibleTableRows(INITIAL_TABLE_ROWS)
+        })
       } catch (err) {
         if (err.name === 'AbortError') return
         setError(err.message || 'Geçmiş veriler yüklenemedi.')
@@ -546,55 +578,7 @@ function HistoryView({ liveDistricts = [] }) {
     }
   }, [loadHistory])
 
-  const syncToMssql = useCallback(async () => {
-    setSyncing(true)
-    setSyncNotice(null)
-    try {
-      const body =
-        mode === 'single'
-          ? { start_date: singleDate, end_date: singleDate, source_mode: 'auto', include_districts: true }
-          : { start_date: startDate, end_date: endDate, source_mode: 'auto', include_districts: true }
-
-      const resp = await fetch('/api/storage/backfill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const json = await resp.json()
-      if (!resp.ok || json?.ok === false) {
-        throw new Error(json?.detail || json?.reason || `Senkronizasyon hatası (${resp.status})`)
-      }
-
-      const totalRows = Number(json.total_rows_inserted || 0)
-      const cloudSnaps = Number(json.cloud_snapshots_synced || 0)
-      const apiHours = Number(json.api_hours_filled || 0)
-
-      if (totalRows > 0) {
-        const parts = []
-        if (cloudSnaps > 0) parts.push(`${formatInt(cloudSnaps)} bulut ölçümü (gerçek TfL/API)`)
-        if (apiHours > 0) parts.push(`${formatInt(apiHours)} geçmiş API saati`)
-        setSyncNotice({
-          ok: true,
-          message: `MSSQL senkronizasyonu tamamlandı: ${parts.join(' + ')} → toplam ${formatInt(totalRows)} satır kaydedildi.`,
-        })
-        await loadHistory({ forceRefresh: true })
-      } else {
-        setSyncNotice({
-          ok: true,
-          message: 'Seçili tarih aralığındaki mevcut veriler zaten MSSQL veritabanında kayıtlı.',
-        })
-      }
-    } catch (err) {
-      setSyncNotice({
-        ok: false,
-        message: err.message || 'MSSQL senkronizasyonu tamamlanamadı.',
-      })
-    } finally {
-      setSyncing(false)
-    }
-  }, [mode, singleDate, startDate, endDate, loadHistory])
-
-  const applyPreset = (preset) => {
+  const applyPreset = useCallback((preset) => {
     setActivePreset(preset.id)
     if (preset.mode === 'single') {
       setMode('single')
@@ -606,12 +590,15 @@ function HistoryView({ liveDistricts = [] }) {
       setEndDate(isoDateDaysAgo(1))
       setGranularity(preset.rangeDays > 7 ? 'daily' : 'auto')
     }
-  }
+  }, [])
 
-  const summary = data?.summary || {}
-  const series = data?.series || []
+  const summary = data?.summary || EMPTY_OBJ
+  const series = data?.series || EMPTY_ARR
   const queryInfo = data?.query || null
-  const lakeStats = data?.lake_stats || null
+  const tableRows = useMemo(
+    () => (showTable ? series.slice(0, visibleTableRows) : EMPTY_ARR),
+    [showTable, series, visibleTableRows]
+  )
 
   const showGranularityToggle = mode === 'range' && (queryInfo?.days_count ?? 2) > 1
 
@@ -647,16 +634,6 @@ function HistoryView({ liveDistricts = [] }) {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={syncToMssql}
-              disabled={syncing || loading}
-              title="Seçili tarihteki 7/24 bulut ölçümlerini ve eksik geçmiş saatleri MSSQL veritabanına kalıcı olarak kaydeder"
-              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm shadow-indigo-500/20 transition-opacity hover:opacity-95 disabled:opacity-50"
-            >
-              <CloudDownload className={`h-3.5 w-3.5 ${syncing ? 'animate-bounce' : ''}`} />
-              {syncing ? 'Senkronize Ediliyor…' : "Eksik Saatleri MSSQL'e Kaydet"}
-            </button>
             <button
               type="button"
               onClick={() => loadHistory({ forceRefresh: true })}
@@ -790,7 +767,7 @@ function HistoryView({ liveDistricts = [] }) {
               className="rounded-xl border border-slate-200/90 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-800 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
             >
               <option value="all">Tüm Londra (Genel Ortalama)</option>
-              {districtsList.map((d) => (
+              {districtOptions.map((d) => (
                 <option key={d.district_id} value={d.district_id}>
                   {d.district_name}
                 </option>
@@ -833,33 +810,6 @@ function HistoryView({ liveDistricts = [] }) {
         <div className="flex items-center gap-2.5 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">
           <AlertCircle className="h-4 w-4 shrink-0" />
           <span>{error}</span>
-        </div>
-      )}
-
-      {/* MSSQL Sync Status Banner */}
-      {syncNotice && (
-        <div
-          className={`flex items-center justify-between gap-2.5 rounded-2xl border px-4 py-3 text-xs font-semibold ${
-            syncNotice.ok
-              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-              : 'border-rose-200 bg-rose-50 text-rose-700'
-          }`}
-        >
-          <div className="flex items-center gap-2">
-            {syncNotice.ok ? (
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-            ) : (
-              <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
-            )}
-            <span>{syncNotice.message}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setSyncNotice(null)}
-            className="shrink-0 rounded-lg px-2 py-0.5 text-[11px] font-bold opacity-70 hover:opacity-100"
-          >
-            Kapat
-          </button>
         </div>
       )}
 
@@ -951,11 +901,6 @@ function HistoryView({ liveDistricts = [] }) {
                             {cfg.unit}
                           </span>
                         </div>
-                        {domSum.min_time && (
-                          <div className="text-[10px] font-medium text-slate-400">
-                            {domSum.min_time}
-                          </div>
-                        )}
                       </div>
                       <div className="border-l border-slate-200/70 pl-2.5">
                         <div className="text-[10px] font-semibold text-slate-400">
@@ -967,11 +912,6 @@ function HistoryView({ liveDistricts = [] }) {
                             {cfg.unit}
                           </span>
                         </div>
-                        {domSum.max_time && (
-                          <div className="text-[10px] font-medium text-slate-400">
-                            {domSum.max_time}
-                          </div>
-                        )}
                       </div>
                     </div>
                   )}
@@ -1056,7 +996,7 @@ function HistoryView({ liveDistricts = [] }) {
         <section className="perf-card overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-sm">
           <button
             type="button"
-            onClick={() => setShowTable((v) => !v)}
+            onClick={() => startTransition(() => setShowTable((v) => !v))}
             className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-50/70"
           >
             <div className="flex items-center gap-2.5">
@@ -1097,7 +1037,7 @@ function HistoryView({ liveDistricts = [] }) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono text-[11px] tabular-nums">
-                  {series.map((row) => (
+                  {tableRows.map((row) => (
                     <tr key={row.timestamp} className="hover:bg-slate-50/80">
                       <td className="px-4 py-2 font-sans font-semibold text-slate-700">
                         {row.full_label || row.label}
@@ -1140,41 +1080,30 @@ function HistoryView({ liveDistricts = [] }) {
                   ))}
                 </tbody>
               </table>
+              {series.length > visibleTableRows && (
+                <div className="flex items-center justify-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      startTransition(() => setVisibleTableRows((n) => n + 100))
+                    }
+                    className="rounded-lg border border-slate-200 bg-white px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    Daha Fazla Göster ({series.length - visibleTableRows} kaldı)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      startTransition(() => setVisibleTableRows(series.length))
+                    }
+                    className="rounded-lg bg-slate-200/70 px-3 py-1 text-xs font-bold text-slate-700 hover:bg-slate-200"
+                  >
+                    Tümünü Göster
+                  </button>
+                </div>
+              )}
             </div>
           )}
-        </section>
-      )}
-
-      {/* Cold-Path Data Lake & Source Transparency Footer */}
-      {data && (
-        <section className="rounded-2xl border border-slate-200/80 bg-slate-50/70 px-4 py-3 text-[11px] text-slate-600">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 font-bold text-slate-800">
-                <Database className="h-3.5 w-3.5 text-indigo-600" />
-                Hibrit Geçmiş Veri Mimarisi:
-              </span>
-              <span>
-                Spark Parquet Data Lake eşleşen saat:{' '}
-                <strong className="font-mono text-slate-900">
-                  {lakeStats?.lake_hours_matched ?? 0}/{lakeStats?.total_hours ?? 0}
-                </strong>
-                {lakeStats?.records_read > 0 && (
-                  <> ({formatInt(lakeStats.records_read)} Parquet kaydı)</>
-                )}
-              </span>
-            </div>
-            {data.cached && (
-              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold text-slate-500 ring-1 ring-slate-200">
-                Redis Önbellekten Sunuldu
-              </span>
-            )}
-          </div>
-          <p className="mt-1 text-[11px] text-slate-500">
-            Arşivlenmiş Spark Parquet bölümleri öncelikli olarak okunur; yerel arşivde bulunmayan geçmiş saatler için sıcaklık ve hava kalitesi{' '}
-            <strong>Open-Meteo Tarihsel Arşivi</strong>&apos;nden, elektrik yükü ve karbon yoğunluğu{' '}
-            <strong>Elexon BMRS + NESO Londra</strong>&apos;dan gerçek olarak çekilir; geçmiş trafik hızı ise Data Lake kaydı yoksa o saatteki gerçek yağış/rüzgar verisi ve Londra TfL gün-saat yoğunluk eğrisiyle hesaplanır.
-          </p>
         </section>
       )}
     </div>

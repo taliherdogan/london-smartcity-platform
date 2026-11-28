@@ -1,5 +1,5 @@
 import React, { memo, useState } from 'react'
-import { Activity, Clock, Cpu, Layers } from 'lucide-react'
+import { Activity, Clock, Cpu, Layers, WifiOff } from 'lucide-react'
 import HeaderBar from './components/HeaderBar'
 import KpiCards from './components/KpiCards'
 import LiveCharts from './components/LiveCharts'
@@ -7,7 +7,6 @@ import AnomalyFeed from './components/AnomalyFeed'
 import DistrictView from './components/DistrictView'
 import HistoryView from './components/HistoryView'
 import BenchmarkView from './components/BenchmarkView'
-import SystemHealthPanel from './components/SystemHealthPanel'
 import { useLiveStream } from './hooks/useLiveStream'
 import { formatInt } from './utils/format'
 
@@ -99,8 +98,10 @@ export default function App() {
     sources,
     targetRate,
     benchmarks,
-    systemHealth,
+    todaySummary,
     connected,
+    isOffline,
+    browserOffline,
     controlBusy,
     changeRate,
     refreshBenchmarks,
@@ -114,41 +115,63 @@ export default function App() {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         connected={connected}
+        isOffline={isOffline}
         targetRate={targetRate}
         onRateChange={changeRate}
         controlBusy={controlBusy}
       />
 
       <main className="mx-auto max-w-7xl space-y-5 px-4 pt-5 sm:px-6">
+        {isOffline && (
+          <div
+            role="alert"
+            className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-gradient-to-r from-rose-50 via-amber-50/70 to-rose-50 px-4 py-3 text-rose-900 shadow-sm"
+          >
+            <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-rose-100 text-rose-600 ring-1 ring-rose-200">
+              <WifiOff className="h-4 w-4" />
+            </span>
+            <div className="min-w-0 text-xs leading-relaxed">
+              <div className="font-extrabold text-rose-900">
+                İnternet Bağlantısı Kesildi
+              </div>
+              <p className="mt-0.5 font-medium text-rose-800/90">
+                {browserOffline
+                  ? 'İnternet bağlantınız yok gibi görünüyor. Bağlantı geri geldiğinde canlı veriler otomatik olarak yenilenecektir.'
+                  : 'İnternet bağlantısı olmadığı için anlık veriler güncellenemiyor. Şu an en son kaydedilen veriler gösteriliyor.'}
+              </p>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'live' && (
           <>
             {/* 4 Clean Domain KPI Cards */}
-            <KpiCards domains={liveState?.domains} sources={sources} />
+            <KpiCards domains={liveState?.domains} sources={sources} isOffline={isOffline} />
 
             {/* Live Charts (Left) + Hybrid Anomaly Feed (Right) */}
             <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
               <div className="lg:col-span-8">
-                <LiveCharts timeseries={liveState?.timeseries} />
+                <LiveCharts
+                  timeseries={liveState?.timeseries}
+                  dailySummary={todaySummary}
+                  isLive={connected && !isOffline}
+                />
               </div>
               <div className="lg:col-span-4">
                 <AnomalyFeed
                   alerts={liveState?.alerts}
                   cumulativeAlerts={perf.cumulative_alerts}
+                  isOffline={isOffline}
                 />
               </div>
             </section>
 
             {/* Bottom Live Streaming Telemetry Strip */}
             <TelemetryStrip perf={perf} />
-
-            {/* Expandable Infrastructure & System Health Panel (/api/system) */}
-            <SystemHealthPanel systemHealth={systemHealth} />
           </>
         )}
 
-        {activeTab === 'history' && (
-          <HistoryView liveDistricts={liveState?.districts} />
-        )}
+        {activeTab === 'history' && <HistoryView />}
 
         {activeTab === 'districts' && (
           <DistrictView districts={liveState?.districts} sources={sources} />

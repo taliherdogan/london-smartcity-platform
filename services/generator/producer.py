@@ -16,6 +16,7 @@ import logging
 import os
 import random
 import signal
+import socket
 import threading
 import time
 import uuid
@@ -52,7 +53,7 @@ logger = logging.getLogger("generator")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-DEFAULT_RATE = int(os.getenv("DEFAULT_RATE", "100"))
+DEFAULT_RATE = int(os.getenv("DEFAULT_RATE", "10"))
 MAX_EVENT_RATE = int(os.getenv("MAX_EVENT_RATE", "25000"))
 POLL_INTERVAL = int(os.getenv("API_POLL_INTERVAL_SEC", "60"))
 METADATA_PATH = os.getenv("METADATA_PATH", "/data/metadata/london_districts.json")
@@ -68,12 +69,23 @@ REDIS_SOURCES_KEY = "smartcity:api_sources"
 REDIS_RATE_KEY = "smartcity:control:rate"
 REDIS_ANOMALY_KEY = "smartcity:control:anomaly"
 REDIS_INFRA_GEN_KEY = "smartcity:infra:generator"
+REDIS_INTERNET_KEY = "smartcity:infra:internet"
+INTERNET_CHECK_INTERVAL = float(os.getenv("INTERNET_CHECK_INTERVAL_SEC", "3.0"))
+INTERNET_PROBE_HOSTS = (
+    ("1.1.1.1", 443),
+    ("8.8.8.8", 443),
+    ("api.open-meteo.com", 443),
+)
 
 RUN_PREFIX = uuid.uuid4().hex[:4]
 shared_lock = threading.Lock()
 live_baselines: dict[str, dict[str, Any]] = default_baselines()
 active_anomaly: dict[str, Any] | None = None
 stop_event = threading.Event()
+internet_online = threading.Event()
+internet_online.set()
+first_poll_done = threading.Event()
+poll_now_event = threading.Event()
 
 
 def _handle_signal(signum: int, _frame: Any) -> None:
@@ -104,20 +116,73 @@ def load_districts() -> list[dict[str, Any]]:
     return districts
 
 
+def _has_internet_access() -> bool:
+    """Fast TCP connectivity probe to detect internet loss within seconds."""
+    for host, port in INTERNET_PROBE_HOSTS:
+        try:
+            with socket.create_connection((host, port), timeout=1.5):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def connectivity_loop(r: redis.Redis) -> None:
+    """Monitor internet connectivity and pause/resume pipeline processing immediately."""
+    was_online = True
+    while not stop_event.is_set():
+        is_online = _has_internet_access()
+        if is_online:
+            internet_online.set()
+            if not was_online:
+                logger.info("Internet connectivity RESTORED — resuming live API polling and data processing.")
+                poll_now_event.set()
+        else:
+            internet_online.clear()
+            if was_online:
+                logger.warning("Internet connectivity LOST — pausing data generation and stream processing.")
+        was_online = is_online
+
+        try:
+            r.set(
+                REDIS_INTERNET_KEY,
+                json.dumps(
+                    {
+                        "online": is_online,
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ),
+                ex=20,
+            )
+        except Exception as exc:
+            logger.debug("Redis set internet status warning: %s", exc)
+
+        stop_event.wait(INTERNET_CHECK_INTERVAL)
+
+
 def poller_loop(r: redis.Redis, districts: list[dict[str, Any]]) -> None:
     global live_baselines
     while not stop_event.is_set():
-        try:
-            updated = poll_all_sources(live_baselines, districts)
-            with shared_lock:
-                live_baselines = updated
+        poll_now_event.clear()
+        if internet_online.is_set():
             try:
-                r.set(REDIS_SOURCES_KEY, json.dumps(updated))
+                updated = poll_all_sources(live_baselines, districts)
+                with shared_lock:
+                    live_baselines = updated
+                first_poll_done.set()
+                try:
+                    r.set(REDIS_SOURCES_KEY, json.dumps(updated))
+                except Exception as exc:
+                    logger.warning("Redis set api_sources failed: %s", exc)
             except Exception as exc:
-                logger.warning("Redis set api_sources failed: %s", exc)
-        except Exception as exc:
-            logger.warning("API poller iteration failed: %s", exc)
-        stop_event.wait(POLL_INTERVAL)
+                logger.warning("API poller iteration failed: %s", exc)
+        # Wait up to POLL_INTERVAL, waking early on shutdown or internet restore
+        deadline = time.monotonic() + POLL_INTERVAL
+        while not stop_event.is_set() and not poll_now_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            poll_now_event.wait(min(1.0, remaining))
 
 
 def _district_tfl_multiplier(district: dict[str, Any], corridor_statuses: dict[str, Any]) -> tuple[float, int]:
@@ -312,6 +377,9 @@ def main() -> None:
             logger.warning("Waiting for Redis (attempt %d/5): %s", attempt + 1, exc)
             time.sleep(1.5)
 
+    conn_thread = threading.Thread(target=connectivity_loop, args=(r,), daemon=True)
+    conn_thread.start()
+
     poller_thread = threading.Thread(target=poller_loop, args=(r, districts), daemon=True)
     poller_thread.start()
 
@@ -345,9 +413,10 @@ def main() -> None:
     )
 
     domains = ("traffic", "weather", "air_quality", "energy")
+    num_domains = len(domains)
     ticks_per_sec = 10
     tick_duration = 1.0 / ticks_per_sec
-    current_rate = max(20, min(MAX_EVENT_RATE, DEFAULT_RATE))
+    current_rate = max(10, min(MAX_EVENT_RATE, DEFAULT_RATE))
     last_control_check = 0.0
     total_sent = 0
     window_sent = 0
@@ -372,7 +441,7 @@ def main() -> None:
                 try:
                     raw_rate = r.get(REDIS_RATE_KEY)
                     if isinstance(raw_rate, str) and raw_rate:
-                        current_rate = max(20, min(MAX_EVENT_RATE, int(raw_rate)))
+                        current_rate = max(10, min(MAX_EVENT_RATE, int(raw_rate)))
                     raw_anom = r.get(REDIS_ANOMALY_KEY)
                     if isinstance(raw_anom, str) and raw_anom:
                         parsed = json.loads(raw_anom)
@@ -386,10 +455,43 @@ def main() -> None:
                 except Exception as exc:
                     logger.debug("Control poll warning: %s", exc)
 
-            events_this_tick = max(4, int(round(current_rate / ticks_per_sec)))
+            events_this_tick = max(1, int(round(current_rate / ticks_per_sec)))
 
             with shared_lock:
                 baselines_snapshot = dict(live_baselines)
+
+            # Pause all event production (and downstream Spark processing) while internet is down
+            all_apis_down = first_poll_done.is_set() and not any(
+                b.get("status") == "live" for b in baselines_snapshot.values()
+            )
+            if not internet_online.is_set() or all_apis_down:
+                producer.poll(0)
+                if tick_start - last_infra_publish >= 2.0:
+                    try:
+                        r.set(
+                            REDIS_INFRA_GEN_KEY,
+                            json.dumps(
+                                {
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "status": "paused_offline",
+                                    "target_rate_eps": current_rate,
+                                    "actual_rate_eps": 0.0,
+                                    "max_rate_eps": MAX_EVENT_RATE,
+                                    "total_sent": total_sent,
+                                    "queue_len": len(producer),
+                                    "backpressure_hits": backpressure_hits,
+                                    "dropped_events": dropped_events,
+                                    "delivery_errors": delivery_errors,
+                                }
+                            ),
+                            ex=30,
+                        )
+                    except Exception:
+                        pass
+                    window_sent = 0
+                    last_infra_publish = tick_start
+                stop_event.wait(0.25)
+                continue
 
             # Compute shared tick metadata once per 100ms tick (huge CPU savings at 5K-25K ev/s)
             now_ms = int(time.time() * 1000)
@@ -406,8 +508,8 @@ def main() -> None:
                 if stop_event.is_set():
                     break
                 seq = total_sent + i
-                domain = domains[seq & 3]
-                district = districts[(seq >> 2) % num_districts]
+                domain = domains[seq % num_domains]
+                district = districts[(seq // num_domains) % num_districts]
                 evt = build_event(
                     seq=seq,
                     domain=domain,

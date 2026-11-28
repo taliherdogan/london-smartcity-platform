@@ -5,11 +5,16 @@ const MIN_UI_COMMIT_MS = 600
 export function useLiveStream(activeTab = 'live') {
   const [liveState, setLiveState] = useState(null)
   const [sources, setSources] = useState({})
-  const [targetRate, setTargetRate] = useState(100)
+  const [targetRate, setTargetRate] = useState(10)
   const [activeAnomaly, setActiveAnomaly] = useState(null)
   const [benchmarks, setBenchmarks] = useState(null)
   const [systemHealth, setSystemHealth] = useState(null)
+  const [todaySummary, setTodaySummary] = useState(null)
   const [connected, setConnected] = useState(false)
+  const [browserOffline, setBrowserOffline] = useState(
+    () => typeof navigator !== 'undefined' && navigator.onLine === false
+  )
+  const [serverInternetOnline, setServerInternetOnline] = useState(true)
   const [controlBusy, setControlBusy] = useState(false)
 
   const wsRef = useRef(null)
@@ -22,6 +27,14 @@ export function useLiveStream(activeTab = 'live') {
   const lastSourcesJsonRef = useRef('')
   const activeTabRef = useRef(activeTab)
   activeTabRef.current = activeTab
+  const flushFnRef = useRef(null)
+
+  const sourceEntries = Object.values(sources || {})
+  const apisOffline =
+    sourceEntries.length > 0 && sourceEntries.every((s) => s?.status !== 'live')
+  const isOffline = browserOffline || !serverInternetOnline || apisOffline
+  const isOfflineRef = useRef(isOffline)
+  isOfflineRef.current = isOffline
 
   const fetchSources = useCallback(async () => {
     if (document.hidden) return
@@ -37,6 +50,9 @@ export function useLiveStream(activeTab = 'live') {
       }
       if (s.target_rate) {
         setTargetRate((prev) => (prev === s.target_rate ? prev : s.target_rate))
+      }
+      if (typeof s.internet_online === 'boolean') {
+        setServerInternetOnline(s.internet_online)
       }
       setActiveAnomaly(s.active_anomaly || null)
     } catch {
@@ -67,14 +83,35 @@ export function useLiveStream(activeTab = 'live') {
     }
   }, [])
 
+  const fetchTodaySummary = useCallback(async () => {
+    if (document.hidden) return
+    try {
+      const res = await fetch('/api/history?days_ago=0&district_id=all&granularity=hourly')
+      if (!res.ok) return
+      const data = await res.json()
+      if (data?.summary) {
+        startTransition(() => setTodaySummary(data.summary))
+      }
+    } catch {
+      // retry silently on next poll
+    }
+  }, [])
+
   const refreshBenchmarks = useCallback(async () => {
     await Promise.all([fetchSources(), fetchBenchmarks()])
   }, [fetchSources, fetchBenchmarks])
 
-  // Refresh benchmark data when entering the benchmarks tab
+  // Refresh benchmark data when entering the benchmarks tab, and flush buffered live frame when returning to live/districts
   useEffect(() => {
     if (activeTab === 'benchmarks') {
       fetchBenchmarks()
+    } else if (
+      !isOfflineRef.current &&
+      (activeTab === 'live' || activeTab === 'districts') &&
+      pendingRawFrameRef.current &&
+      flushFnRef.current
+    ) {
+      flushFnRef.current()
     }
   }, [activeTab, fetchBenchmarks])
 
@@ -92,19 +129,26 @@ export function useLiveStream(activeTab = 'live') {
           setSources(data.sources)
         }
         if (data.target_rate) setTargetRate(data.target_rate)
+        if (typeof data.internet_online === 'boolean') {
+          setServerInternetOnline(data.internet_online)
+        }
       })
       .catch(() => {})
 
     fetchSources()
     fetchBenchmarks()
     fetchSystemHealth()
-    const metaTimer = setInterval(fetchSources, 20000)
+    fetchTodaySummary()
+    const metaTimer = setInterval(fetchSources, 5000)
     const sysTimer = setInterval(fetchSystemHealth, 10000)
+    const todayTimer = setInterval(fetchTodaySummary, 300000)
 
     const commitPendingFrame = () => {
       rafIdRef.current = null
       throttleTimerRef.current = null
-      if (unmounted || document.hidden) return
+      if (unmounted || document.hidden || isOfflineRef.current) return
+      // Avoid parsing & re-rendering live stream frames while viewing History or Benchmarks
+      if (activeTabRef.current === 'history' || activeTabRef.current === 'benchmarks') return
 
       const raw = pendingRawFrameRef.current
       pendingRawFrameRef.current = null
@@ -129,7 +173,8 @@ export function useLiveStream(activeTab = 'live') {
     }
 
     const scheduleFlush = () => {
-      if (unmounted || document.hidden) return
+      if (unmounted || document.hidden || isOfflineRef.current) return
+      if (activeTabRef.current === 'history' || activeTabRef.current === 'benchmarks') return
       if (rafIdRef.current !== null || throttleTimerRef.current !== null) return
 
       const elapsed = performance.now() - lastCommitMsRef.current
@@ -144,13 +189,24 @@ export function useLiveStream(activeTab = 'live') {
         }, MIN_UI_COMMIT_MS - elapsed)
       }
     }
+    flushFnRef.current = scheduleFlush
 
     const handleVisibilityChange = () => {
       if (!document.hidden && pendingRawFrameRef.current) {
         scheduleFlush()
       }
     }
+    const handleOnline = () => {
+      setBrowserOffline(false)
+      fetchSources()
+      fetchTodaySummary()
+    }
+    const handleOffline = () => {
+      setBrowserOffline(true)
+    }
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('online', handleOnline)
+    window.addEventListener('offline', handleOffline)
 
     const connectWs = () => {
       if (unmounted) return
@@ -163,6 +219,7 @@ export function useLiveStream(activeTab = 'live') {
         setConnected(true)
       }
       ws.onmessage = (evt) => {
+        if (isOfflineRef.current) return
         // Skip heartbeats cheaply without full JSON parse
         if (typeof evt.data === 'string' && evt.data.includes('"heartbeat"')) return
         // Store raw string; only parse the latest frame when actually committing
@@ -184,14 +241,17 @@ export function useLiveStream(activeTab = 'live') {
     return () => {
       unmounted = true
       document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('online', handleOnline)
+      window.removeEventListener('offline', handleOffline)
       clearInterval(metaTimer)
       clearInterval(sysTimer)
+      clearInterval(todayTimer)
       clearTimeout(reconnectTimer.current)
       if (throttleTimerRef.current !== null) clearTimeout(throttleTimerRef.current)
       if (rafIdRef.current !== null) window.cancelAnimationFrame(rafIdRef.current)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [fetchSources, fetchBenchmarks, fetchSystemHealth])
+  }, [fetchSources, fetchBenchmarks, fetchSystemHealth, fetchTodaySummary])
 
   const changeRate = useCallback(async (rate) => {
     setControlBusy(true)
@@ -235,7 +295,11 @@ export function useLiveStream(activeTab = 'live') {
     activeAnomaly,
     benchmarks,
     systemHealth,
+    todaySummary,
     connected,
+    isOffline,
+    browserOffline,
+    apisOffline,
     controlBusy,
     changeRate,
     injectAnomaly,

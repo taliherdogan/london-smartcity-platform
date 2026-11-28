@@ -186,16 +186,16 @@ class MSSQLSink:
             with conn.cursor(as_dict=True) as cur:
                 cur.execute(
                     """
-                    SELECT cumulative_events, cumulative_alerts, window_history_json
-                    FROM dbo.platform_state
-                    WHERE state_key = N'spark_streaming'
+                    SELECT toplam_olay_sayisi, toplam_uyari_sayisi, pencere_gecmisi_json
+                    FROM dbo.platform_durumu
+                    WHERE durum_anahtari = N'spark_streaming'
                     """
                 )
                 row = cur.fetchone()
                 if row:
-                    result["cumulative_events"] = max(0, int(row.get("cumulative_events") or 0))
-                    result["cumulative_alerts"] = max(0, int(row.get("cumulative_alerts") or 0))
-                    raw_win = row.get("window_history_json")
+                    result["cumulative_events"] = max(0, int(row.get("toplam_olay_sayisi") or 0))
+                    result["cumulative_alerts"] = max(0, int(row.get("toplam_uyari_sayisi") or 0))
+                    raw_win = row.get("pencere_gecmisi_json")
                     if isinstance(raw_win, str) and raw_win:
                         try:
                             parsed_win = json.loads(raw_win)
@@ -207,16 +207,16 @@ class MSSQLSink:
                 cur.execute(
                     """
                     SELECT TOP 40
-                        alert_id, recorded_at, district_id, district_name, domain,
-                        metric_label, unit, severity, method, z_score,
-                        measured_value, baseline_value, threshold_label, message, injected
-                    FROM dbo.anomaly_alerts
-                    ORDER BY recorded_at DESC, id DESC
+                        uyari_id, kayit_zamani_utc, bolge_id, bolge_adi, alan,
+                        metrik_etiketi, birim, seviye, tespit_yontemi, z_skoru,
+                        olculen_deger, referans_deger, esik_etiketi, aciklama, test_enjekte
+                    FROM dbo.anomali_uyarilari
+                    ORDER BY kayit_zamani_utc DESC, id DESC
                     """
                 )
                 alerts_out: list[dict[str, Any]] = []
                 for al in cur.fetchall() or []:
-                    rec_at = al["recorded_at"]
+                    rec_at = al["kayit_zamani_utc"]
                     ts_iso = (
                         rec_at.replace(tzinfo=timezone.utc).isoformat()
                         if isinstance(rec_at, datetime)
@@ -224,25 +224,25 @@ class MSSQLSink:
                     )
                     alerts_out.append(
                         {
-                            "alert_id": al["alert_id"],
+                            "alert_id": al["uyari_id"],
                             "timestamp": ts_iso,
-                            "district_id": al["district_id"],
-                            "district_name": al["district_name"],
-                            "domain": al["domain"],
-                            "metric_label": al.get("metric_label") or "",
-                            "unit": al.get("unit") or "",
-                            "severity": al["severity"],
-                            "method": al.get("method") or "",
-                            "z_score": float(al["z_score"]) if al.get("z_score") is not None else 0.0,
-                            "value": float(al["measured_value"]) if al.get("measured_value") is not None else 0.0,
+                            "district_id": al["bolge_id"],
+                            "district_name": al["bolge_adi"],
+                            "domain": al["alan"],
+                            "metric_label": al.get("metrik_etiketi") or "",
+                            "unit": al.get("birim") or "",
+                            "severity": al["seviye"],
+                            "method": al.get("tespit_yontemi") or "",
+                            "z_score": float(al["z_skoru"]) if al.get("z_skoru") is not None else 0.0,
+                            "value": float(al["olculen_deger"]) if al.get("olculen_deger") is not None else 0.0,
                             "baseline_value": (
-                                float(al["baseline_value"]) if al.get("baseline_value") is not None else None
+                                float(al["referans_deger"]) if al.get("referans_deger") is not None else None
                             ),
-                            "baseline_label": "Beklenen Normal",
+                            "baseline_label": "Normal Değer",
                             "direction": "high",
-                            "threshold_label": al.get("threshold_label") or "",
-                            "message": al.get("message") or "",
-                            "injected": bool(al.get("injected")),
+                            "threshold_label": al.get("esik_etiketi") or "",
+                            "message": al.get("aciklama") or "",
+                            "injected": bool(al.get("test_enjekte")),
                         }
                     )
                 result["recent_alerts"] = alerts_out
@@ -250,24 +250,24 @@ class MSSQLSink:
                 cur.execute(
                     """
                     SELECT TOP 60
-                        t.recorded_at,
-                        t.throughput_eps,
-                        t.p50_latency_ms,
-                        MAX(CASE WHEN s.domain = N'traffic' THEN s.avg_value END) AS traffic,
-                        MAX(CASE WHEN s.domain = N'weather' THEN s.avg_value END) AS weather,
-                        MAX(CASE WHEN s.domain = N'air_quality' THEN s.avg_value END) AS air_quality,
-                        MAX(CASE WHEN s.domain = N'energy' THEN s.avg_value END) AS energy
-                    FROM dbo.batch_telemetry t
-                    LEFT JOIN dbo.domain_snapshots s
-                        ON s.recorded_at = t.recorded_at AND s.batch_id = t.batch_id
-                    GROUP BY t.recorded_at, t.batch_id, t.throughput_eps, t.p50_latency_ms
-                    ORDER BY t.recorded_at DESC
+                        t.kayit_zamani_utc,
+                        t.islenen_hiz_olay_sn,
+                        t.p50_gecikme_ms,
+                        MAX(CASE WHEN s.alan = N'traffic' THEN s.ortalama_deger END) AS traffic,
+                        MAX(CASE WHEN s.alan = N'weather' THEN s.ortalama_deger END) AS weather,
+                        MAX(CASE WHEN s.alan = N'air_quality' THEN s.ortalama_deger END) AS air_quality,
+                        MAX(CASE WHEN s.alan = N'energy' THEN s.ortalama_deger END) AS energy
+                    FROM dbo.batch_telemetri t
+                    LEFT JOIN dbo.alan_ozetleri s
+                        ON s.kayit_zamani_utc = t.kayit_zamani_utc AND s.batch_no = t.batch_no
+                    GROUP BY t.kayit_zamani_utc, t.batch_no, t.islenen_hiz_olay_sn, t.p50_gecikme_ms
+                    ORDER BY t.kayit_zamani_utc DESC
                     """
                 )
                 ts_rows = list(reversed(cur.fetchall() or []))
                 ts_out: list[dict[str, Any]] = []
                 for tr in ts_rows:
-                    rec_at = tr["recorded_at"]
+                    rec_at = tr["kayit_zamani_utc"]
                     if isinstance(rec_at, datetime):
                         lon_dt = _utc_to_london_naive(rec_at)
                         ts_iso = rec_at.replace(tzinfo=timezone.utc).isoformat()
@@ -283,8 +283,8 @@ class MSSQLSink:
                             "weather": tr.get("weather"),
                             "air_quality": tr.get("air_quality"),
                             "energy": tr.get("energy"),
-                            "throughput_eps": tr.get("throughput_eps"),
-                            "latency_ms": tr.get("p50_latency_ms"),
+                            "throughput_eps": tr.get("islenen_hiz_olay_sn"),
+                            "latency_ms": tr.get("p50_gecikme_ms"),
                         }
                     )
                 result["timeseries"] = ts_out
@@ -409,10 +409,10 @@ class MSSQLSink:
                     if domain_rows:
                         cur.executemany(
                             """
-                            INSERT INTO dbo.domain_snapshots (
-                                recorded_at, london_time, batch_id, domain, metric_name,
-                                avg_value, min_value, max_value, unit, event_count,
-                                data_source, secondary_json
+                            INSERT INTO dbo.alan_ozetleri (
+                                kayit_zamani_utc, londra_zamani, batch_no, alan, metrik_adi,
+                                ortalama_deger, en_dusuk_deger, en_yuksek_deger, birim, olay_sayisi,
+                                veri_kaynagi, ikincil_metrikler_json
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             domain_rows,
@@ -420,10 +420,10 @@ class MSSQLSink:
                     if district_rows:
                         cur.executemany(
                             """
-                            INSERT INTO dbo.district_measurements (
-                                recorded_at, london_time, batch_id, district_id, district_name,
-                                zone_type, domain, avg_value, min_value, max_value,
-                                event_count, status, tfl_disruptions
+                            INSERT INTO dbo.bolge_olcumleri (
+                                kayit_zamani_utc, londra_zamani, batch_no, bolge_id, bolge_adi,
+                                bolge_tipi, alan, ortalama_deger, en_dusuk_deger, en_yuksek_deger,
+                                olay_sayisi, durum, tfl_yol_aksamasi
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             district_rows,
@@ -431,11 +431,11 @@ class MSSQLSink:
                     for al_row in alert_rows:
                         cur.execute(
                             """
-                            IF NOT EXISTS (SELECT 1 FROM dbo.anomaly_alerts WHERE alert_id = %s)
-                            INSERT INTO dbo.anomaly_alerts (
-                                alert_id, recorded_at, london_time, district_id, district_name,
-                                domain, metric_label, unit, severity, method, z_score,
-                                measured_value, baseline_value, threshold_label, message, injected
+                            IF NOT EXISTS (SELECT 1 FROM dbo.anomali_uyarilari WHERE uyari_id = %s)
+                            INSERT INTO dbo.anomali_uyarilari (
+                                uyari_id, kayit_zamani_utc, londra_zamani, bolge_id, bolge_adi,
+                                alan, metrik_etiketi, birim, seviye, tespit_yontemi, z_skoru,
+                                olculen_deger, referans_deger, esik_etiketi, aciklama, test_enjekte
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (al_row[0], *al_row),
@@ -443,11 +443,11 @@ class MSSQLSink:
 
                     cur.execute(
                         """
-                        INSERT INTO dbo.batch_telemetry (
-                            recorded_at, batch_id, target_rate_eps, throughput_eps, batch_events,
-                            avg_latency_ms, p50_latency_ms, p95_latency_ms, spark_batch_ms,
-                            cumulative_events, cumulative_alerts, backpressure_status,
-                            driver_rss_mb, lake_size_mb
+                        INSERT INTO dbo.batch_telemetri (
+                            kayit_zamani_utc, batch_no, hedef_hiz_olay_sn, islenen_hiz_olay_sn, batch_olay_sayisi,
+                            ort_gecikme_ms, p50_gecikme_ms, p95_gecikme_ms, spark_islem_suresi_ms,
+                            toplam_olay_sayisi, toplam_uyari_sayisi, geri_basinc_durumu,
+                            surucu_bellek_mb, veri_golu_boyut_mb
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         telemetry_row,
@@ -455,17 +455,17 @@ class MSSQLSink:
 
                     cur.execute(
                         """
-                        UPDATE dbo.platform_state
-                        SET cumulative_events = %s,
-                            cumulative_alerts = %s,
-                            last_batch_id = %s,
-                            window_history_json = %s,
-                            updated_at = SYSUTCDATETIME()
-                        WHERE state_key = N'spark_streaming';
+                        UPDATE dbo.platform_durumu
+                        SET toplam_olay_sayisi = %s,
+                            toplam_uyari_sayisi = %s,
+                            son_batch_no = %s,
+                            pencere_gecmisi_json = %s,
+                            guncelleme_zamani = SYSUTCDATETIME()
+                        WHERE durum_anahtari = N'spark_streaming';
                         IF @@ROWCOUNT = 0
-                        INSERT INTO dbo.platform_state (
-                            state_key, cumulative_events, cumulative_alerts,
-                            last_batch_id, window_history_json
+                        INSERT INTO dbo.platform_durumu (
+                            durum_anahtari, toplam_olay_sayisi, toplam_uyari_sayisi,
+                            son_batch_no, pencere_gecmisi_json
                         ) VALUES (N'spark_streaming', %s, %s, %s, %s);
                         """,
                         (
@@ -483,10 +483,10 @@ class MSSQLSink:
                     self._batches_written += 1
                     if self.retention_days > 0 and self._batches_written % 1000 == 0:
                         cutoff = rec_utc - timedelta(days=self.retention_days)
-                        cur.execute("DELETE FROM dbo.district_measurements WHERE recorded_at < %s", (cutoff,))
-                        cur.execute("DELETE FROM dbo.domain_snapshots WHERE recorded_at < %s", (cutoff,))
-                        cur.execute("DELETE FROM dbo.batch_telemetry WHERE recorded_at < %s", (cutoff,))
-                        cur.execute("DELETE FROM dbo.anomaly_alerts WHERE recorded_at < %s", (cutoff,))
+                        cur.execute("DELETE FROM dbo.bolge_olcumleri WHERE kayit_zamani_utc < %s", (cutoff,))
+                        cur.execute("DELETE FROM dbo.alan_ozetleri WHERE kayit_zamani_utc < %s", (cutoff,))
+                        cur.execute("DELETE FROM dbo.batch_telemetri WHERE kayit_zamani_utc < %s", (cutoff,))
+                        cur.execute("DELETE FROM dbo.anomali_uyarilari WHERE kayit_zamani_utc < %s", (cutoff,))
 
                 conn.commit()
                 return True
@@ -501,191 +501,345 @@ class MSSQLSink:
         return False
 
 
-_DDL_STATEMENTS: list[str] = [
+_TABLE_RENAMES: list[tuple[str, str]] = [
+    ("platform_state", "platform_durumu"),
+    ("domain_snapshots", "alan_ozetleri"),
+    ("district_measurements", "bolge_olcumleri"),
+    ("anomaly_alerts", "anomali_uyarilari"),
+    ("batch_telemetry", "batch_telemetri"),
+]
+
+_INDEX_RENAMES: list[tuple[str, str, str]] = [
+    ("alan_ozetleri", "IX_domain_snapshots_london_domain", "IX_alan_ozetleri_londra_alan"),
+    ("bolge_olcumleri", "IX_district_measurements_london_dist_dom", "IX_bolge_olcumleri_londra_bolge_alan"),
+    ("anomali_uyarilari", "IX_anomaly_alerts_recorded", "IX_anomali_uyarilari_kayit_zamani"),
+    ("batch_telemetri", "IX_batch_telemetry_recorded", "IX_batch_telemetri_kayit_zamani"),
+]
+
+_LEGACY_VIEWS: list[str] = [
+    "vw_hourly_city_summary",
+    "vw_recent_alerts",
+    "vw_latest_district_status",
+]
+
+_COLUMN_RENAMES: list[tuple[str, str, str]] = [
+    # dbo.platform_durumu
+    ("platform_durumu", "state_key", "durum_anahtari"),
+    ("platform_durumu", "cumulative_events", "toplam_olay_sayisi"),
+    ("platform_durumu", "cumulative_alerts", "toplam_uyari_sayisi"),
+    ("platform_durumu", "last_batch_id", "son_batch_no"),
+    ("platform_durumu", "window_history_json", "pencere_gecmisi_json"),
+    ("platform_durumu", "updated_at", "guncelleme_zamani"),
+    # dbo.alan_ozetleri
+    ("alan_ozetleri", "recorded_at", "kayit_zamani_utc"),
+    ("alan_ozetleri", "london_time", "londra_zamani"),
+    ("alan_ozetleri", "batch_id", "batch_no"),
+    ("alan_ozetleri", "domain", "alan"),
+    ("alan_ozetleri", "metric_name", "metrik_adi"),
+    ("alan_ozetleri", "avg_value", "ortalama_deger"),
+    ("alan_ozetleri", "min_value", "en_dusuk_deger"),
+    ("alan_ozetleri", "max_value", "en_yuksek_deger"),
+    ("alan_ozetleri", "unit", "birim"),
+    ("alan_ozetleri", "event_count", "olay_sayisi"),
+    ("alan_ozetleri", "data_source", "veri_kaynagi"),
+    ("alan_ozetleri", "secondary_json", "ikincil_metrikler_json"),
+    # dbo.bolge_olcumleri
+    ("bolge_olcumleri", "recorded_at", "kayit_zamani_utc"),
+    ("bolge_olcumleri", "london_time", "londra_zamani"),
+    ("bolge_olcumleri", "batch_id", "batch_no"),
+    ("bolge_olcumleri", "district_id", "bolge_id"),
+    ("bolge_olcumleri", "district_name", "bolge_adi"),
+    ("bolge_olcumleri", "zone_type", "bolge_tipi"),
+    ("bolge_olcumleri", "domain", "alan"),
+    ("bolge_olcumleri", "avg_value", "ortalama_deger"),
+    ("bolge_olcumleri", "min_value", "en_dusuk_deger"),
+    ("bolge_olcumleri", "max_value", "en_yuksek_deger"),
+    ("bolge_olcumleri", "event_count", "olay_sayisi"),
+    ("bolge_olcumleri", "status", "durum"),
+    ("bolge_olcumleri", "tfl_disruptions", "tfl_yol_aksamasi"),
+    # dbo.anomali_uyarilari
+    ("anomali_uyarilari", "alert_id", "uyari_id"),
+    ("anomali_uyarilari", "recorded_at", "kayit_zamani_utc"),
+    ("anomali_uyarilari", "london_time", "londra_zamani"),
+    ("anomali_uyarilari", "district_id", "bolge_id"),
+    ("anomali_uyarilari", "district_name", "bolge_adi"),
+    ("anomali_uyarilari", "domain", "alan"),
+    ("anomali_uyarilari", "metric_label", "metrik_etiketi"),
+    ("anomali_uyarilari", "unit", "birim"),
+    ("anomali_uyarilari", "severity", "seviye"),
+    ("anomali_uyarilari", "method", "tespit_yontemi"),
+    ("anomali_uyarilari", "z_score", "z_skoru"),
+    ("anomali_uyarilari", "measured_value", "olculen_deger"),
+    ("anomali_uyarilari", "baseline_value", "referans_deger"),
+    ("anomali_uyarilari", "threshold_label", "esik_etiketi"),
+    ("anomali_uyarilari", "message", "aciklama"),
+    ("anomali_uyarilari", "injected", "test_enjekte"),
+    # dbo.batch_telemetri
+    ("batch_telemetri", "recorded_at", "kayit_zamani_utc"),
+    ("batch_telemetri", "batch_id", "batch_no"),
+    ("batch_telemetri", "target_rate_eps", "hedef_hiz_olay_sn"),
+    ("batch_telemetri", "throughput_eps", "islenen_hiz_olay_sn"),
+    ("batch_telemetri", "batch_events", "batch_olay_sayisi"),
+    ("batch_telemetri", "avg_latency_ms", "ort_gecikme_ms"),
+    ("batch_telemetri", "p50_latency_ms", "p50_gecikme_ms"),
+    ("batch_telemetri", "p95_latency_ms", "p95_gecikme_ms"),
+    ("batch_telemetri", "spark_batch_ms", "spark_islem_suresi_ms"),
+    ("batch_telemetri", "cumulative_events", "toplam_olay_sayisi"),
+    ("batch_telemetri", "cumulative_alerts", "toplam_uyari_sayisi"),
+    ("batch_telemetri", "backpressure_status", "geri_basinc_durumu"),
+    ("batch_telemetri", "driver_rss_mb", "surucu_bellek_mb"),
+    ("batch_telemetri", "lake_size_mb", "veri_golu_boyut_mb"),
+]
+
+
+def _build_table_migration_statements() -> list[str]:
+    """Generate idempotent sp_rename statements for zero-data-loss Turkish table rename."""
+    return [
+        f"""
+        IF OBJECT_ID(N'dbo.{old_table}', N'U') IS NOT NULL
+           AND OBJECT_ID(N'dbo.{new_table}', N'U') IS NULL
+        BEGIN
+            EXEC sp_rename N'dbo.{old_table}', N'{new_table}';
+        END;
+        """
+        for old_table, new_table in _TABLE_RENAMES
+    ]
+
+
+def _build_column_migration_statements() -> list[str]:
+    """Generate idempotent sp_rename statements for zero-data-loss Turkish column migration."""
+    return [
+        f"""
+        IF COL_LENGTH(N'dbo.{table}', N'{old_col}') IS NOT NULL
+           AND COL_LENGTH(N'dbo.{table}', N'{new_col}') IS NULL
+        BEGIN
+            EXEC sp_rename N'dbo.{table}.{old_col}', N'{new_col}', N'COLUMN';
+        END;
+        """
+        for table, old_col, new_col in _COLUMN_RENAMES
+    ]
+
+
+def _build_index_migration_statements() -> list[str]:
+    """Generate idempotent sp_rename statements for Turkish index names."""
+    return [
+        f"""
+        IF EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = N'{old_idx}' AND object_id = OBJECT_ID(N'dbo.{table}')
+        ) AND NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = N'{new_idx}' AND object_id = OBJECT_ID(N'dbo.{table}')
+        )
+        BEGIN
+            EXEC sp_rename N'dbo.{table}.{old_idx}', N'{new_idx}', N'INDEX';
+        END;
+        """
+        for table, old_idx, new_idx in _INDEX_RENAMES
+    ]
+
+
+_TABLE_DDL_STATEMENTS: list[str] = [
     """
-    IF OBJECT_ID(N'dbo.platform_state', N'U') IS NULL
-    CREATE TABLE dbo.platform_state (
-        state_key NVARCHAR(64) NOT NULL PRIMARY KEY,
-        cumulative_events BIGINT NOT NULL DEFAULT 0,
-        cumulative_alerts BIGINT NOT NULL DEFAULT 0,
-        last_batch_id BIGINT NOT NULL DEFAULT 0,
-        window_history_json NVARCHAR(MAX) NULL,
-        updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+    IF OBJECT_ID(N'dbo.platform_durumu', N'U') IS NULL
+    CREATE TABLE dbo.platform_durumu (
+        durum_anahtari NVARCHAR(64) NOT NULL PRIMARY KEY,
+        toplam_olay_sayisi BIGINT NOT NULL DEFAULT 0,
+        toplam_uyari_sayisi BIGINT NOT NULL DEFAULT 0,
+        son_batch_no BIGINT NOT NULL DEFAULT 0,
+        pencere_gecmisi_json NVARCHAR(MAX) NULL,
+        guncelleme_zamani DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
     );
     """,
     """
-    IF OBJECT_ID(N'dbo.domain_snapshots', N'U') IS NULL
-    CREATE TABLE dbo.domain_snapshots (
+    IF OBJECT_ID(N'dbo.alan_ozetleri', N'U') IS NULL
+    CREATE TABLE dbo.alan_ozetleri (
         id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        recorded_at DATETIME2 NOT NULL,
-        london_time DATETIME2 NOT NULL,
-        batch_id BIGINT NOT NULL,
-        domain NVARCHAR(32) NOT NULL,
-        metric_name NVARCHAR(64) NULL,
-        avg_value FLOAT NOT NULL,
-        min_value FLOAT NULL,
-        max_value FLOAT NULL,
-        unit NVARCHAR(32) NULL,
-        event_count INT NOT NULL,
-        data_source NVARCHAR(128) NULL,
-        secondary_json NVARCHAR(MAX) NULL
+        kayit_zamani_utc DATETIME2 NOT NULL,
+        londra_zamani DATETIME2 NOT NULL,
+        batch_no BIGINT NOT NULL,
+        alan NVARCHAR(32) NOT NULL,
+        metrik_adi NVARCHAR(64) NULL,
+        ortalama_deger FLOAT NOT NULL,
+        en_dusuk_deger FLOAT NULL,
+        en_yuksek_deger FLOAT NULL,
+        birim NVARCHAR(32) NULL,
+        olay_sayisi INT NOT NULL,
+        veri_kaynagi NVARCHAR(128) NULL,
+        ikincil_metrikler_json NVARCHAR(MAX) NULL
     );
     """,
     """
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE name = N'IX_domain_snapshots_london_domain'
-          AND object_id = OBJECT_ID(N'dbo.domain_snapshots')
-    )
-    CREATE INDEX IX_domain_snapshots_london_domain
-        ON dbo.domain_snapshots (london_time DESC, domain)
-        INCLUDE (avg_value, min_value, max_value, event_count);
-    """,
-    """
-    IF OBJECT_ID(N'dbo.district_measurements', N'U') IS NULL
-    CREATE TABLE dbo.district_measurements (
+    IF OBJECT_ID(N'dbo.bolge_olcumleri', N'U') IS NULL
+    CREATE TABLE dbo.bolge_olcumleri (
         id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        recorded_at DATETIME2 NOT NULL,
-        london_time DATETIME2 NOT NULL,
-        batch_id BIGINT NOT NULL,
-        district_id NVARCHAR(64) NOT NULL,
-        district_name NVARCHAR(128) NOT NULL,
-        zone_type NVARCHAR(32) NULL,
-        domain NVARCHAR(32) NOT NULL,
-        avg_value FLOAT NOT NULL,
-        min_value FLOAT NULL,
-        max_value FLOAT NULL,
-        event_count INT NOT NULL,
-        status NVARCHAR(32) NOT NULL,
-        tfl_disruptions INT NOT NULL DEFAULT 0
+        kayit_zamani_utc DATETIME2 NOT NULL,
+        londra_zamani DATETIME2 NOT NULL,
+        batch_no BIGINT NOT NULL,
+        bolge_id NVARCHAR(64) NOT NULL,
+        bolge_adi NVARCHAR(128) NOT NULL,
+        bolge_tipi NVARCHAR(32) NULL,
+        alan NVARCHAR(32) NOT NULL,
+        ortalama_deger FLOAT NOT NULL,
+        en_dusuk_deger FLOAT NULL,
+        en_yuksek_deger FLOAT NULL,
+        olay_sayisi INT NOT NULL,
+        durum NVARCHAR(32) NOT NULL,
+        tfl_yol_aksamasi INT NOT NULL DEFAULT 0
     );
     """,
     """
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE name = N'IX_district_measurements_london_dist_dom'
-          AND object_id = OBJECT_ID(N'dbo.district_measurements')
-    )
-    CREATE INDEX IX_district_measurements_london_dist_dom
-        ON dbo.district_measurements (london_time DESC, district_id, domain)
-        INCLUDE (avg_value, status, event_count);
-    """,
-    """
-    IF OBJECT_ID(N'dbo.anomaly_alerts', N'U') IS NULL
-    CREATE TABLE dbo.anomaly_alerts (
+    IF OBJECT_ID(N'dbo.anomali_uyarilari', N'U') IS NULL
+    CREATE TABLE dbo.anomali_uyarilari (
         id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        alert_id NVARCHAR(64) NOT NULL UNIQUE,
-        recorded_at DATETIME2 NOT NULL,
-        london_time DATETIME2 NOT NULL,
-        district_id NVARCHAR(64) NOT NULL,
-        district_name NVARCHAR(128) NOT NULL,
-        domain NVARCHAR(32) NOT NULL,
-        metric_label NVARCHAR(64) NULL,
-        unit NVARCHAR(32) NULL,
-        severity NVARCHAR(32) NOT NULL,
-        method NVARCHAR(64) NULL,
-        z_score FLOAT NULL,
-        measured_value FLOAT NULL,
-        baseline_value FLOAT NULL,
-        threshold_label NVARCHAR(128) NULL,
-        message NVARCHAR(512) NULL,
-        injected BIT NOT NULL DEFAULT 0
+        uyari_id NVARCHAR(64) NOT NULL UNIQUE,
+        kayit_zamani_utc DATETIME2 NOT NULL,
+        londra_zamani DATETIME2 NOT NULL,
+        bolge_id NVARCHAR(64) NOT NULL,
+        bolge_adi NVARCHAR(128) NOT NULL,
+        alan NVARCHAR(32) NOT NULL,
+        metrik_etiketi NVARCHAR(64) NULL,
+        birim NVARCHAR(32) NULL,
+        seviye NVARCHAR(32) NOT NULL,
+        tespit_yontemi NVARCHAR(64) NULL,
+        z_skoru FLOAT NULL,
+        olculen_deger FLOAT NULL,
+        referans_deger FLOAT NULL,
+        esik_etiketi NVARCHAR(128) NULL,
+        aciklama NVARCHAR(512) NULL,
+        test_enjekte BIT NOT NULL DEFAULT 0
     );
     """,
     """
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE name = N'IX_anomaly_alerts_recorded'
-          AND object_id = OBJECT_ID(N'dbo.anomaly_alerts')
-    )
-    CREATE INDEX IX_anomaly_alerts_recorded
-        ON dbo.anomaly_alerts (recorded_at DESC)
-        INCLUDE (district_id, domain, severity);
-    """,
-    """
-    IF OBJECT_ID(N'dbo.batch_telemetry', N'U') IS NULL
-    CREATE TABLE dbo.batch_telemetry (
+    IF OBJECT_ID(N'dbo.batch_telemetri', N'U') IS NULL
+    CREATE TABLE dbo.batch_telemetri (
         id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        recorded_at DATETIME2 NOT NULL,
-        batch_id BIGINT NOT NULL,
-        target_rate_eps INT NULL,
-        throughput_eps FLOAT NULL,
-        batch_events INT NOT NULL,
-        avg_latency_ms FLOAT NULL,
-        p50_latency_ms FLOAT NULL,
-        p95_latency_ms FLOAT NULL,
-        spark_batch_ms FLOAT NULL,
-        cumulative_events BIGINT NOT NULL,
-        cumulative_alerts BIGINT NOT NULL,
-        backpressure_status NVARCHAR(32) NULL,
-        driver_rss_mb FLOAT NULL,
-        lake_size_mb FLOAT NULL
+        kayit_zamani_utc DATETIME2 NOT NULL,
+        batch_no BIGINT NOT NULL,
+        hedef_hiz_olay_sn INT NULL,
+        islenen_hiz_olay_sn FLOAT NULL,
+        batch_olay_sayisi INT NOT NULL,
+        ort_gecikme_ms FLOAT NULL,
+        p50_gecikme_ms FLOAT NULL,
+        p95_gecikme_ms FLOAT NULL,
+        spark_islem_suresi_ms FLOAT NULL,
+        toplam_olay_sayisi BIGINT NOT NULL,
+        toplam_uyari_sayisi BIGINT NOT NULL,
+        geri_basinc_durumu NVARCHAR(32) NULL,
+        surucu_bellek_mb FLOAT NULL,
+        veri_golu_boyut_mb FLOAT NULL
     );
-    """,
-    """
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE name = N'IX_batch_telemetry_recorded'
-          AND object_id = OBJECT_ID(N'dbo.batch_telemetry')
-    )
-    CREATE INDEX IX_batch_telemetry_recorded
-        ON dbo.batch_telemetry (recorded_at DESC);
-    """,
-    """
-    CREATE OR ALTER VIEW dbo.vw_hourly_city_summary AS
-    SELECT
-        DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0) AS saat_londra,
-        ROUND(AVG(CASE WHEN domain = N'traffic' THEN avg_value END), 2) AS trafik_hiz_kms,
-        ROUND(AVG(CASE WHEN domain = N'weather' THEN avg_value END), 2) AS sicaklik_c,
-        ROUND(AVG(CASE WHEN domain = N'air_quality' THEN avg_value END), 2) AS hava_kalitesi_aqi,
-        ROUND(AVG(CASE WHEN domain = N'energy' THEN avg_value END), 2) AS enerji_mw,
-        SUM(event_count) AS toplam_kayit
-    FROM dbo.domain_snapshots
-    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0);
-    """,
-    """
-    CREATE OR ALTER VIEW dbo.vw_recent_alerts AS
-    SELECT
-        london_time AS zaman_londra,
-        district_name AS bolge,
-        domain AS alan,
-        severity AS seviye,
-        metric_label AS metrik,
-        measured_value AS olculen_deger,
-        unit AS birim,
-        baseline_value AS normal_deger,
-        method AS yontem,
-        z_score,
-        message AS aciklama
-    FROM dbo.anomaly_alerts;
-    """,
-    """
-    CREATE OR ALTER VIEW dbo.vw_latest_district_status AS
-    WITH ranked AS (
-        SELECT
-            district_id,
-            district_name,
-            zone_type,
-            domain,
-            avg_value,
-            status,
-            tfl_disruptions,
-            london_time,
-            ROW_NUMBER() OVER (PARTITION BY district_id, domain ORDER BY recorded_at DESC, id DESC) AS rn
-        FROM dbo.district_measurements
-    )
-    SELECT
-        district_id,
-        district_name,
-        zone_type,
-        MAX(london_time) AS son_guncelleme,
-        ROUND(MAX(CASE WHEN domain = N'traffic' THEN avg_value END), 2) AS trafik_hiz_kms,
-        ROUND(MAX(CASE WHEN domain = N'weather' THEN avg_value END), 2) AS sicaklik_c,
-        ROUND(MAX(CASE WHEN domain = N'air_quality' THEN avg_value END), 2) AS hava_kalitesi_aqi,
-        ROUND(MAX(CASE WHEN domain = N'energy' THEN avg_value END), 2) AS enerji_mw,
-        MAX(tfl_disruptions) AS yol_aksamasi
-    FROM ranked
-    WHERE rn = 1
-    GROUP BY district_id, district_name, zone_type;
     """,
 ]
+
+_INDEX_DDL_STATEMENTS: list[str] = [
+    """
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = N'IX_alan_ozetleri_londra_alan'
+          AND object_id = OBJECT_ID(N'dbo.alan_ozetleri')
+    )
+    CREATE INDEX IX_alan_ozetleri_londra_alan
+        ON dbo.alan_ozetleri (londra_zamani DESC, alan)
+        INCLUDE (ortalama_deger, en_dusuk_deger, en_yuksek_deger, olay_sayisi);
+    """,
+    """
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = N'IX_bolge_olcumleri_londra_bolge_alan'
+          AND object_id = OBJECT_ID(N'dbo.bolge_olcumleri')
+    )
+    CREATE INDEX IX_bolge_olcumleri_londra_bolge_alan
+        ON dbo.bolge_olcumleri (londra_zamani DESC, bolge_id, alan)
+        INCLUDE (ortalama_deger, durum, olay_sayisi);
+    """,
+    """
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = N'IX_anomali_uyarilari_kayit_zamani'
+          AND object_id = OBJECT_ID(N'dbo.anomali_uyarilari')
+    )
+    CREATE INDEX IX_anomali_uyarilari_kayit_zamani
+        ON dbo.anomali_uyarilari (kayit_zamani_utc DESC)
+        INCLUDE (bolge_id, alan, seviye);
+    """,
+    """
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = N'IX_batch_telemetri_kayit_zamani'
+          AND object_id = OBJECT_ID(N'dbo.batch_telemetri')
+    )
+    CREATE INDEX IX_batch_telemetri_kayit_zamani
+        ON dbo.batch_telemetri (kayit_zamani_utc DESC);
+    """,
+]
+
+_VIEW_DDL_STATEMENTS: list[str] = [
+    *[f"DROP VIEW IF EXISTS dbo.{legacy_view};" for legacy_view in _LEGACY_VIEWS],
+    """
+    CREATE OR ALTER VIEW dbo.vw_saatlik_sehir_ozeti AS
+    SELECT
+        DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS saat_londra,
+        ROUND(AVG(CASE WHEN alan = N'traffic' THEN ortalama_deger END), 2) AS trafik_hiz_kms,
+        ROUND(AVG(CASE WHEN alan = N'weather' THEN ortalama_deger END), 2) AS sicaklik_c,
+        ROUND(AVG(CASE WHEN alan = N'air_quality' THEN ortalama_deger END), 2) AS hava_kalitesi_aqi,
+        ROUND(AVG(CASE WHEN alan = N'energy' THEN ortalama_deger END), 2) AS enerji_mw,
+        SUM(olay_sayisi) AS toplam_kayit
+    FROM dbo.alan_ozetleri
+    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0);
+    """,
+    """
+    CREATE OR ALTER VIEW dbo.vw_son_uyarilar AS
+    SELECT
+        londra_zamani AS zaman_londra,
+        bolge_adi AS bolge,
+        alan,
+        seviye,
+        metrik_etiketi AS metrik,
+        olculen_deger,
+        birim,
+        referans_deger AS normal_deger,
+        tespit_yontemi AS yontem,
+        z_skoru,
+        aciklama
+    FROM dbo.anomali_uyarilari;
+    """,
+    """
+    CREATE OR ALTER VIEW dbo.vw_son_bolge_durumu AS
+    WITH ranked AS (
+        SELECT
+            bolge_id,
+            bolge_adi,
+            bolge_tipi,
+            alan,
+            ortalama_deger,
+            durum,
+            tfl_yol_aksamasi,
+            londra_zamani,
+            ROW_NUMBER() OVER (PARTITION BY bolge_id, alan ORDER BY kayit_zamani_utc DESC, id DESC) AS rn
+        FROM dbo.bolge_olcumleri
+    )
+    SELECT
+        bolge_id,
+        bolge_adi,
+        bolge_tipi,
+        MAX(londra_zamani) AS son_guncelleme,
+        ROUND(MAX(CASE WHEN alan = N'traffic' THEN ortalama_deger END), 2) AS trafik_hiz_kms,
+        ROUND(MAX(CASE WHEN alan = N'weather' THEN ortalama_deger END), 2) AS sicaklik_c,
+        ROUND(MAX(CASE WHEN alan = N'air_quality' THEN ortalama_deger END), 2) AS hava_kalitesi_aqi,
+        ROUND(MAX(CASE WHEN alan = N'energy' THEN ortalama_deger END), 2) AS enerji_mw,
+        MAX(tfl_yol_aksamasi) AS yol_aksamasi
+    FROM ranked
+    WHERE rn = 1
+    GROUP BY bolge_id, bolge_adi, bolge_tipi;
+    """,
+]
+
+_DDL_STATEMENTS: list[str] = (
+    _build_table_migration_statements()
+    + _TABLE_DDL_STATEMENTS
+    + _build_column_migration_statements()
+    + _build_index_migration_statements()
+    + _INDEX_DDL_STATEMENTS
+    + _VIEW_DDL_STATEMENTS
+)

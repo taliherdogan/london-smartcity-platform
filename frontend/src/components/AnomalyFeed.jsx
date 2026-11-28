@@ -29,7 +29,7 @@ const DOMAIN_META = {
     filterIdle: 'bg-blue-50/80 text-blue-700 ring-1 ring-blue-200/60 hover:bg-blue-100/80',
   },
   weather: {
-    label: 'Hava',
+    label: 'Hava Durumu',
     unit: '°C',
     icon: CloudLightning,
     iconBox: 'bg-cyan-50 text-cyan-600 ring-1 ring-cyan-200/80',
@@ -39,7 +39,7 @@ const DOMAIN_META = {
   },
   air_quality: {
     label: 'Hava Kalitesi',
-    unit: 'AQI',
+    unit: 'puan',
     icon: Wind,
     iconBox: 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200/80',
     pill: 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/70',
@@ -128,16 +128,47 @@ function getComparisonInfo(al) {
   }
 }
 
+function getReadableBaselineLabel(al) {
+  const raw = (al.baseline_label || '').trim()
+  if (raw === 'Son 60 sn Ort.' || raw === 'Son 1 Dakika Ortalaması') {
+    return 'Son 1 Dakika Ortalaması'
+  }
+  if (!raw || raw === 'Beklenen Normal' || raw === 'Normal Değer') {
+    if (al.domain === 'traffic') return 'Normal Trafik Hızı'
+    if (al.domain === 'air_quality') return 'Normal Hava Kalitesi'
+    if (al.domain === 'energy') return 'Normal Enerji Yükü'
+    if (al.domain === 'weather') {
+      return al.unit === 'm/s' || al.metric_label === 'Rüzgar Hızı'
+        ? 'Normal Rüzgar Hızı'
+        : 'Normal Sıcaklık'
+    }
+    return 'Normal Değer'
+  }
+  return raw
+}
+
 const AnomalyCard = memo(function AnomalyCard({ al, nowMs, isExpanded, onToggle }) {
   const isCrit = al.severity === 'critical'
   const dMeta = DOMAIN_META[al.domain] || DOMAIN_META.traffic
   const DomainIcon = dMeta.icon
   const exactTime = formatTime(al.timestamp)
   const relTime = formatRelativeTime(al.timestamp, nowMs)
-  const unit = al.unit || dMeta.unit
+  const rawUnit = al.unit || dMeta.unit
+  const isLegacyWindMs = al.domain === 'weather' && rawUnit === 'm/s'
+  const unit =
+    rawUnit === 'AQI' || al.domain === 'air_quality'
+      ? 'puan'
+      : isLegacyWindMs
+        ? 'km/s'
+        : rawUnit
+  const displayValue = isLegacyWindMs ? Number(al.value) * 3.6 : al.value
   const hasBaseline = al.baseline_value !== undefined && al.baseline_value !== null
-  const baselineLabel = al.baseline_label || 'Beklenen Normal'
-  const comp = getComparisonInfo(al)
+  const displayBaseline =
+    hasBaseline && isLegacyWindMs ? Number(al.baseline_value) * 3.6 : al.baseline_value
+  const baselineLabel = getReadableBaselineLabel(al)
+  const comp = getComparisonInfo(
+    isLegacyWindMs ? { ...al, value: displayValue, baseline_value: displayBaseline } : al
+  )
   const DirIcon = comp.dir === 'down' ? ArrowDownRight : ArrowUpRight
 
   return (
@@ -210,14 +241,14 @@ const AnomalyCard = memo(function AnomalyCard({ al, nowMs, isExpanded, onToggle 
                   isCrit ? 'text-rose-600' : 'text-amber-700'
                 }`}
               >
-                {formatCleanValue(al.value, al.domain)} {unit}
+                {formatCleanValue(displayValue, al.domain)} {unit}
               </strong>
             </span>
             {hasBaseline && (
               <span className="text-[10px] text-slate-400">
                 / Normal{' '}
                 <strong className="font-mono font-bold text-slate-600 tabular-nums">
-                  {formatCleanValue(al.baseline_value, al.domain)} {unit}
+                  {formatCleanValue(displayBaseline, al.domain)} {unit}
                 </strong>
               </span>
             )}
@@ -250,7 +281,7 @@ const AnomalyCard = memo(function AnomalyCard({ al, nowMs, isExpanded, onToggle 
               <div
                 className="absolute top-0 h-full w-0.5 bg-slate-800/80"
                 style={{ left: `${comp.basePct}%` }}
-                title={`${baselineLabel}: ${formatCleanValue(al.baseline_value, al.domain)} ${unit}`}
+                title={`${baselineLabel}: ${formatCleanValue(displayBaseline, al.domain)} ${unit}`}
               />
             </div>
             <div className="mt-1 flex items-center justify-between text-[9px] font-semibold text-slate-400">
@@ -290,7 +321,7 @@ const AnomalyCard = memo(function AnomalyCard({ al, nowMs, isExpanded, onToggle 
             <div className="flex items-center justify-between gap-2">
               <span className="text-slate-400">{baselineLabel}:</span>
               <span className="font-mono font-semibold text-slate-700">
-                {formatCleanValue(al.baseline_value, al.domain)} {unit}
+                {formatCleanValue(displayBaseline, al.domain)} {unit}
               </span>
             </div>
           )}
@@ -306,21 +337,21 @@ const AnomalyCard = memo(function AnomalyCard({ al, nowMs, isExpanded, onToggle 
   )
 })
 
-function AnomalyFeed({ alerts = [], cumulativeAlerts = 0 }) {
+function AnomalyFeed({ alerts = [], cumulativeAlerts = 0, isOffline = false }) {
   const [severityFilter, setSeverityFilter] = useState('all')
   const [domainFilter, setDomainFilter] = useState('all')
   const [showGuide, setShowGuide] = useState(false)
   const [expandedId, setExpandedId] = useState(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
-  // Update relative timestamps every 5s (only while alerts exist and tab is visible)
+  // Update relative timestamps every 5s (only while alerts exist, tab is visible, and online)
   useEffect(() => {
-    if (alerts.length === 0) return undefined
+    if (alerts.length === 0 || isOffline) return undefined
     const timer = setInterval(() => {
       if (!document.hidden) setNowMs(Date.now())
     }, 5000)
     return () => clearInterval(timer)
-  }, [alerts.length > 0])
+  }, [alerts.length > 0, isOffline])
 
   const handleToggleExpand = useCallback((id) => {
     setExpandedId((prev) => (prev === id ? null : id))

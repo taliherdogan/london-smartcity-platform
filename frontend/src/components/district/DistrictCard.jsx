@@ -1,5 +1,5 @@
 import React, { memo } from 'react'
-import { MapPin, Route, Thermometer, TrafficCone, Wind, Zap } from 'lucide-react'
+import { MapPin, Thermometer, TrafficCone, Wind, Zap } from 'lucide-react'
 import {
   ZONE_LABELS,
   getAqiLevel,
@@ -8,7 +8,7 @@ import {
   getTrafficLevel,
 } from './districtHelpers'
 
-function DistrictCard({ district: d, corridorStatuses, stats }) {
+function DistrictCard({ district: d, stats }) {
   const hasTfLDisruption = (d.tfl_disruptions || 0) > 0
   const isCritical = d.status === 'critical'
   const isWarning = d.status === 'warning'
@@ -98,30 +98,6 @@ function DistrictCard({ district: d, corridorStatuses, stats }) {
           {badgeText}
         </span>
       </div>
-
-      {d.tfl_corridors?.length > 0 && (
-        <div className="mt-3.5 flex flex-wrap items-center gap-1.5 rounded-xl bg-slate-50/80 px-2.5 py-2 ring-1 ring-slate-200/60">
-          <Route className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-          {d.tfl_corridors.map((road) => {
-            const info = corridorStatuses[road]
-            const disrupted = info && Number(info.rank || 0) >= 2
-            return (
-              <span
-                key={road}
-                title={disrupted ? `${road}: Yolda yoğunluk veya gecikme var` : `${road}: Normal akış`}
-                className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5 text-[10px] font-semibold transition-colors ${
-                  disrupted
-                    ? 'bg-amber-100/90 text-amber-900 ring-1 ring-amber-300/90'
-                    : 'bg-white text-slate-600 ring-1 ring-slate-200/80'
-                }`}
-              >
-                <span className={`h-1.5 w-1.5 rounded-full ${disrupted ? 'animate-pulse bg-amber-500' : 'bg-emerald-500'}`} />
-                {road}
-              </span>
-            )
-          })}
-        </div>
-      )}
 
       <div className="mt-3.5 grid grid-cols-2 gap-2.5">
         {/* Traffic */}

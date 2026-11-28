@@ -18,9 +18,9 @@ import {
   Wind,
   Zap,
 } from 'lucide-react'
-import { formatInt } from '../utils/format'
+import { computeNiceYAxis, formatAxisTick, formatInt } from '../utils/format'
 
-const CHART_MARGIN = { top: 8, right: 10, left: -14, bottom: 0 }
+const CHART_MARGIN = { top: 8, right: 10, left: 0, bottom: 0 }
 const AXIS_TICK = { fontSize: 10, fill: '#94a3b8', fontWeight: 500 }
 
 const CHARTS = [
@@ -37,8 +37,9 @@ const CHARTS = [
     cursor: { stroke: '#2563EB', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#2563EB', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: true,
+    axisOpts: { minSpan: 2, minStep: 0.5, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(0),
     getLevel: (v) => {
       if (v < 14) return { label: 'Çok Yoğun', badge: 'bg-rose-100 text-rose-700' }
       if (v < 22) return { label: 'Yoğun', badge: 'bg-amber-100 text-amber-800' }
@@ -59,8 +60,9 @@ const CHARTS = [
     cursor: { stroke: '#059669', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#059669', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: false,
+    axisOpts: { minSpan: 4, minStep: 1, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(0),
     getLevel: (v) => {
       if (v <= 20) return { label: 'İyi', badge: 'bg-emerald-100 text-emerald-700' }
       if (v <= 40) return { label: 'Makul', badge: 'bg-emerald-100 text-emerald-700' }
@@ -82,8 +84,9 @@ const CHARTS = [
     cursor: { stroke: '#D97706', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#D97706', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: false,
+    axisOpts: { minSpan: 15, minStep: 5, allowNegative: false },
+    axisSuffix: '',
     formatVal: (v) => formatInt(v),
-    formatAxis: (v) => `${Math.round(Number(v))}`,
     getLevel: (v) => {
       if (v >= 195) return { label: 'Yüksek Yük', badge: 'bg-orange-100 text-orange-800' }
       if (v >= 130) return { label: 'Normal Yük', badge: 'bg-amber-100 text-amber-800' }
@@ -103,8 +106,9 @@ const CHARTS = [
     cursor: { stroke: '#0891B2', strokeWidth: 1, strokeDasharray: '3 3', strokeOpacity: 0.45 },
     activeDot: { r: 5, fill: '#0891B2', stroke: '#ffffff', strokeWidth: 2 },
     higherIsBetter: null,
+    axisOpts: { minSpan: 1.5, minStep: 0.5, allowNegative: true },
+    axisSuffix: '°',
     formatVal: (v) => Number(v).toFixed(1),
-    formatAxis: (v) => Number(v).toFixed(1),
     getLevel: (v) => {
       if (v <= 4) return { label: 'Soğuk', badge: 'bg-blue-100 text-blue-700' }
       if (v <= 13) return { label: 'Serin', badge: 'bg-cyan-100 text-cyan-800' }
@@ -148,8 +152,15 @@ function ChartTooltip({ active, payload, label, cfg, avg }) {
   )
 }
 
-const LiveChartCard = memo(function LiveChartCard({ cfg, timeseries, st }) {
+const LiveChartCard = memo(function LiveChartCard({ cfg, timeseries, st, daySummary, isLive }) {
   const Icon = cfg.icon
+
+  const hasDayMin = daySummary?.min != null && Number.isFinite(Number(daySummary.min))
+  const hasDayMax = daySummary?.max != null && Number.isFinite(Number(daySummary.max))
+  const hasDayAvg = daySummary?.avg != null && Number.isFinite(Number(daySummary.avg))
+  const footerMin = st ? (hasDayMin ? Math.min(Number(daySummary.min), st.min) : st.min) : null
+  const footerMax = st ? (hasDayMax ? Math.max(Number(daySummary.max), st.max) : st.max) : null
+  const footerAvg = st ? (hasDayAvg ? Number(daySummary.avg) : st.avg) : null
 
   let trendTone = 'bg-slate-100 text-slate-500'
   let TrendIcon = Minus
@@ -235,11 +246,12 @@ const LiveChartCard = memo(function LiveChartCard({ cfg, timeseries, st }) {
                 minTickGap={30}
               />
               <YAxis
+                width={40}
                 tick={AXIS_TICK}
                 tickLine={false}
                 axisLine={false}
-                tickCount={4}
-                tickFormatter={cfg.formatAxis}
+                ticks={st.ticks}
+                tickFormatter={(v) => formatAxisTick(v, st.decimals, cfg.axisSuffix)}
                 domain={st.domain}
               />
               <Tooltip
@@ -268,41 +280,61 @@ const LiveChartCard = memo(function LiveChartCard({ cfg, timeseries, st }) {
         )}
       </div>
 
-      {/* Compact Min / Avg / Max Footer Strip */}
+      {/* Daily Min / Avg / Max Footer Strip */}
       {st && (
         <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-[11px]">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-slate-500">
-            <span>
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-slate-500">
+            <span
+              className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500"
+              title="Bugünün (Londra saati) en düşük, ortalama ve en yüksek değerleri"
+            >
+              Bugün
+            </span>
+            <span
+              title={
+                daySummary?.min_time
+                  ? `Bugün en düşük değer (${daySummary.min_time})`
+                  : 'Bugün en düşük değer'
+              }
+            >
               En Düşük:{' '}
               <strong className="font-mono font-bold text-slate-700 tabular-nums">
-                {cfg.formatVal(st.min)}
+                {cfg.formatVal(footerMin)}
               </strong>
             </span>
-            <span>
+            <span title="Bugün günlük ortalama">
               Ort:{' '}
               <strong className="font-mono font-bold text-slate-700 tabular-nums">
-                {cfg.formatVal(st.avg)}
+                {cfg.formatVal(footerAvg)}
               </strong>
             </span>
-            <span>
+            <span
+              title={
+                daySummary?.max_time
+                  ? `Bugün en yüksek değer (${daySummary.max_time})`
+                  : 'Bugün en yüksek değer'
+              }
+            >
               En Yüksek:{' '}
               <strong className="font-mono font-bold text-slate-700 tabular-nums">
-                {cfg.formatVal(st.max)}
+                {cfg.formatVal(footerMax)}
               </strong>
             </span>
           </div>
 
-          <span className="inline-flex shrink-0 items-center gap-1.5 text-[10px] font-bold text-emerald-600">
-            <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-            Canlı
-          </span>
+          {isLive && (
+            <span className="inline-flex shrink-0 items-center gap-1.5 text-[10px] font-bold text-emerald-600">
+              <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+              Canlı
+            </span>
+          )}
         </div>
       )}
     </div>
   )
 })
 
-function LiveCharts({ timeseries = [] }) {
+function LiveCharts({ timeseries = [], dailySummary = null, isLive = true }) {
   const statsByKey = useMemo(() => {
     const out = {}
     for (const cfg of CHARTS) {
@@ -331,8 +363,7 @@ function LiveCharts({ timeseries = [] }) {
 
       const avg = sum / count
       const delta = latest - first
-      const span = max - min
-      const pad = span > 0 ? span * 0.2 : Math.max(Math.abs(avg) * 0.05, 0.5)
+      const yAxis = computeNiceYAxis(min, max, cfg.axisOpts)
 
       out[cfg.key] = {
         min,
@@ -340,7 +371,9 @@ function LiveCharts({ timeseries = [] }) {
         avg,
         latest,
         delta,
-        domain: [min - pad, max + pad],
+        domain: yAxis.domain,
+        ticks: yAxis.ticks,
+        decimals: yAxis.decimals,
       }
     }
     return out
@@ -354,6 +387,8 @@ function LiveCharts({ timeseries = [] }) {
           cfg={cfg}
           timeseries={timeseries}
           st={statsByKey[cfg.key]}
+          daySummary={dailySummary?.[cfg.key]}
+          isLive={isLive}
         />
       ))}
     </div>

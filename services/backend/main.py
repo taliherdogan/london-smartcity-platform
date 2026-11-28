@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import httpx
 import redis.asyncio as aioredis
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +77,7 @@ REDIS_ANOMALY_KEY = "smartcity:control:anomaly"
 REDIS_TELEMETRY_PREFIX = "smartcity:rate_telemetry:"
 REDIS_INFRA_SPARK_KEY = "smartcity:infra:spark"
 REDIS_INFRA_GEN_KEY = "smartcity:infra:generator"
+REDIS_INTERNET_KEY = "smartcity:infra:internet"
 REDIS_HISTORY_CACHE_PREFIX = "smartcity:history:v1:"
 
 
@@ -146,6 +148,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 redis_client: aioredis.Redis | None = None
+history_http_client: httpx.AsyncClient | None = None
 pubsub_task: asyncio.Task[None] | None = None
 broadcaster_task: asyncio.Task[None] | None = None
 backfill_task: asyncio.Task[None] | None = None
@@ -226,7 +229,7 @@ async def redis_listener() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global redis_client, pubsub_task, broadcaster_task, backfill_task
+    global redis_client, history_http_client, pubsub_task, broadcaster_task, backfill_task
     pool = aioredis.ConnectionPool(
         host=REDIS_HOST,
         port=REDIS_PORT,
@@ -238,6 +241,11 @@ async def lifespan(_app: FastAPI):
         health_check_interval=15,
     )
     redis_client = aioredis.Redis(connection_pool=pool)
+    history_http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(8.0, connect=4.0),
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=24, max_keepalive_connections=12),
+    )
     broadcaster_task = asyncio.create_task(manager.broadcaster_loop())
     pubsub_task = asyncio.create_task(redis_listener())
     backfill_task = asyncio.create_task(auto_backfill_loop())
@@ -245,6 +253,8 @@ async def lifespan(_app: FastAPI):
     for task in (pubsub_task, broadcaster_task, backfill_task):
         if task:
             task.cancel()
+    if history_http_client:
+        await history_http_client.aclose()
     if redis_client:
         await redis_client.aclose()
 
@@ -278,7 +288,7 @@ class BackfillRequest(BaseModel):
     end_date: str | None = Field(default=None, description="End date (YYYY-MM-DD)")
     hours: int | None = Field(default=None, ge=1, le=744, description="Shortcut: sync last N hours")
     source_mode: str = Field(default="auto", pattern="^(auto|api_only)$")
-    include_districts: bool = Field(default=True, description="Also fill 32 boroughs in district_measurements")
+    include_districts: bool = Field(default=True, description="Also fill 32 boroughs in bolge_olcumleri")
     allow_traffic_model: bool | None = Field(
         default=None,
         description="Override MSSQL_BACKFILL_ALLOW_TRAFFIC_MODEL (default: false -> real traffic only)",
@@ -357,10 +367,11 @@ async def system_status() -> dict[str, Any]:
 async def get_sources() -> dict[str, Any]:
     r = _require_redis()
     try:
-        raw, raw_rate, raw_anom = await asyncio.gather(
+        raw, raw_rate, raw_anom, raw_inet = await asyncio.gather(
             r.get(REDIS_SOURCES_KEY),
             r.get(REDIS_RATE_KEY),
             r.get(REDIS_ANOMALY_KEY),
+            r.get(REDIS_INTERNET_KEY),
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}") from exc
@@ -370,11 +381,14 @@ async def get_sources() -> dict[str, Any]:
     active_anom = json.loads(raw_anom) if raw_anom else None
     if active_anom and active_anom.get("expires_at", 0) <= time.time():
         active_anom = None
+    inet_info = json.loads(raw_inet) if raw_inet else None
+    internet_online = True if inet_info is None else bool(inet_info.get("online", True))
     return {
         "city": "London, United Kingdom",
         "target_rate": rate,
         "max_rate": MAX_EVENT_RATE,
         "active_anomaly": active_anom,
+        "internet_online": internet_online,
         "sources": sources,
     }
 
@@ -383,18 +397,22 @@ async def get_sources() -> dict[str, Any]:
 async def get_latest_state() -> dict[str, Any]:
     r = _require_redis()
     try:
-        raw_state, raw_sources, raw_rate = await asyncio.gather(
+        raw_state, raw_sources, raw_rate, raw_inet = await asyncio.gather(
             r.get(REDIS_LATEST_KEY),
             r.get(REDIS_SOURCES_KEY),
             r.get(REDIS_RATE_KEY),
+            r.get(REDIS_INTERNET_KEY),
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {exc}") from exc
 
+    inet_info = json.loads(raw_inet) if raw_inet else None
+    internet_online = True if inet_info is None else bool(inet_info.get("online", True))
     return {
         "state": json.loads(raw_state) if raw_state else None,
         "sources": json.loads(raw_sources) if raw_sources else {},
         "target_rate": int(raw_rate or 10),
+        "internet_online": internet_online,
     }
 
 
@@ -526,7 +544,9 @@ async def get_history(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    cache_key = f"{REDIS_HISTORY_CACHE_PREFIX}{s_date.isoformat()}:{e_date.isoformat()}:{district_id}:{granularity}"
+    days_count = (e_date - s_date).days + 1
+    eff_granularity = ("daily" if days_count > 7 else "hourly") if granularity == "auto" else granularity
+    cache_key = f"{REDIS_HISTORY_CACHE_PREFIX}{s_date.isoformat()}:{e_date.isoformat()}:{district_id}:{eff_granularity}"
     r = redis_client
 
     latest_state: dict[str, Any] | None = None
@@ -551,8 +571,10 @@ async def get_history(
             start_date=s_date.isoformat(),
             end_date=e_date.isoformat(),
             district_id=district_id,
-            granularity=granularity,
+            granularity=eff_granularity,
             latest_state=latest_state,
+            http_client=history_http_client,
+            bypass_api_cache=refresh,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

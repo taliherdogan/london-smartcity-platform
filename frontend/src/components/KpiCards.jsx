@@ -155,14 +155,14 @@ const CARD_META = [
   },
 ]
 
-function KpiCards({ domains = {}, sources = {} }) {
+function KpiCards({ domains = {}, sources = {}, isOffline = false }) {
   return (
     <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {CARD_META.map((card) => {
         const Icon = card.icon
         const data = domains[card.key]
         const src = sources[card.key]
-        const isLiveApi = src?.status === 'live'
+        const isLiveApi = !isOffline && src?.status === 'live'
         const val = data?.avg_value
         const status = card.getStatus(val)
         const chips = card.getChips(data)

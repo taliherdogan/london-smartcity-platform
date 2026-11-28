@@ -119,8 +119,10 @@ def _check_schema_ready() -> bool:
             cur.execute(
                 """
                 SELECT CASE
-                    WHEN OBJECT_ID(N'dbo.domain_snapshots', N'U') IS NOT NULL
-                     AND OBJECT_ID(N'dbo.district_measurements', N'U') IS NOT NULL
+                    WHEN OBJECT_ID(N'dbo.alan_ozetleri', N'U') IS NOT NULL
+                     AND OBJECT_ID(N'dbo.bolge_olcumleri', N'U') IS NOT NULL
+                     AND COL_LENGTH(N'dbo.alan_ozetleri', N'londra_zamani') IS NOT NULL
+                     AND COL_LENGTH(N'dbo.bolge_olcumleri', N'bolge_id') IS NOT NULL
                     THEN 1 ELSE 0
                 END
                 """
@@ -162,13 +164,13 @@ def _inspect_existing_mssql_coverage(
             cur.execute(
                 """
                 SELECT
-                    DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0) AS hour_bucket,
-                    domain,
-                    MAX(CASE WHEN batch_id >= 0 THEN 1 ELSE 0 END) AS has_live,
-                    MAX(CASE WHEN batch_id = %s THEN 1 ELSE 0 END) AS has_api
-                FROM dbo.domain_snapshots
-                WHERE london_time >= %s AND london_time <= %s
-                GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0), domain
+                    DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS hour_bucket,
+                    alan AS domain,
+                    MAX(CASE WHEN batch_no >= 0 THEN 1 ELSE 0 END) AS has_live,
+                    MAX(CASE WHEN batch_no = %s THEN 1 ELSE 0 END) AS has_api
+                FROM dbo.alan_ozetleri
+                WHERE londra_zamani >= %s AND londra_zamani <= %s
+                GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0), alan
                 """,
                 (BATCH_ID_API_BACKFILL, window_start_lon, window_end_lon),
             )
@@ -210,10 +212,10 @@ def _write_backfill_rows(
         with conn.cursor() as cur:
             if domain_rows:
                 sql_dom = """
-                    INSERT INTO dbo.domain_snapshots (
-                        recorded_at, london_time, batch_id, domain, metric_name,
-                        avg_value, min_value, max_value, unit, event_count,
-                        data_source, secondary_json
+                    INSERT INTO dbo.alan_ozetleri (
+                        kayit_zamani_utc, londra_zamani, batch_no, alan, metrik_adi,
+                        ortalama_deger, en_dusuk_deger, en_yuksek_deger, birim, olay_sayisi,
+                        veri_kaynagi, ikincil_metrikler_json
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 for i in range(0, len(domain_rows), INSERT_CHUNK_SIZE):
@@ -221,10 +223,10 @@ def _write_backfill_rows(
 
             if district_rows:
                 sql_dist = """
-                    INSERT INTO dbo.district_measurements (
-                        recorded_at, london_time, batch_id, district_id, district_name,
-                        zone_type, domain, avg_value, min_value, max_value,
-                        event_count, status, tfl_disruptions
+                    INSERT INTO dbo.bolge_olcumleri (
+                        kayit_zamani_utc, londra_zamani, batch_no, bolge_id, bolge_adi,
+                        bolge_tipi, alan, ortalama_deger, en_dusuk_deger, en_yuksek_deger,
+                        olay_sayisi, durum, tfl_yol_aksamasi
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 for i in range(0, len(district_rows), INSERT_CHUNK_SIZE):

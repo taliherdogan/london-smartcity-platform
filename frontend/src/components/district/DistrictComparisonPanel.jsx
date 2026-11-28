@@ -295,7 +295,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
                   <XAxis dataKey="name" tick={X_TICK} axisLine={false} tickLine={false} interval={0} angle={-45} textAnchor="end" height={76} dy={6} />
-                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} domain={[0, (max) => Math.ceil((max + 10) / 10) * 10]} />
+                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} allowDecimals={false} domain={[0, (max) => Math.ceil((max + 10) / 10) * 10]} />
                   <Tooltip isAnimationActive={false} cursor={{ fill: '#f8fafc', radius: 8 }} content={<TrafficChartTooltip avgTraffic={chartInsights.avgTraffic} />} />
                   <ReferenceLine y={chartInsights.avgTraffic} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${chartInsights.avgTraffic.toFixed(1)} km/s`, position: 'insideTopRight', fill: '#64748b', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="traffic" name="Hız" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
@@ -383,7 +383,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
                   <XAxis dataKey="name" tick={X_TICK} axisLine={false} tickLine={false} interval={0} angle={-45} textAnchor="end" height={76} dy={6} />
-                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} domain={[0, (max) => Math.ceil((max + 60) / 50) * 50]} />
+                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} allowDecimals={false} domain={[0, (max) => Math.ceil((max + 60) / 50) * 50]} />
                   <Tooltip isAnimationActive={false} cursor={{ fill: '#fffbeb', radius: 8 }} content={<EnergyChartTooltip avgEnergy={chartInsights.avgEnergy} />} />
                   <ReferenceLine y={chartInsights.avgEnergy} stroke="#b45309" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${Math.round(chartInsights.avgEnergy)} MW`, position: 'insideTopRight', fill: '#b45309', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="energy" name="Yük" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
@@ -493,7 +493,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
                   <XAxis dataKey="name" tick={X_TICK} axisLine={false} tickLine={false} interval={0} angle={-45} textAnchor="end" height={76} dy={6} />
-                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} domain={[0, (max) => Math.ceil((max + 15) / 10) * 10]} />
+                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} allowDecimals={false} domain={[0, (max) => Math.ceil((max + 15) / 10) * 10]} />
                   <Tooltip isAnimationActive={false} cursor={{ fill: '#ecfdf5', radius: 8 }} content={<AqiChartTooltip avgAqi={chartInsights.avgAqi} />} />
                   <ReferenceLine y={chartInsights.avgAqi} stroke="#047857" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${Math.round(chartInsights.avgAqi)} puan`, position: 'insideTopRight', fill: '#047857', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="aqi" name="Hava Puanı" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
@@ -579,7 +579,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
                   <XAxis dataKey="name" tick={X_TICK} axisLine={false} tickLine={false} interval={0} angle={-45} textAnchor="end" height={76} dy={6} />
-                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} domain={[(min) => Math.min(0, Math.floor(min - 2)), (max) => Math.ceil(max + 4)]} />
+                  <YAxis tick={Y_TICK} axisLine={false} tickLine={false} allowDecimals={false} tickFormatter={(v) => `${v}°`} domain={[(min) => Math.min(0, Math.floor(min - 2)), (max) => Math.ceil(max + 4)]} />
                   <Tooltip isAnimationActive={false} cursor={{ fill: '#ecfeff', radius: 8 }} content={<TempChartTooltip avgTemp={chartInsights.avgTemp} />} />
                   <ReferenceLine y={chartInsights.avgTemp} stroke="#0e7490" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${chartInsights.avgTemp.toFixed(1)} °C`, position: 'insideTopRight', fill: '#0e7490', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="temp" name="Sıcaklık" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>

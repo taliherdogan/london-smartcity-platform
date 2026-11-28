@@ -83,13 +83,13 @@ def read_mssql_hourly(
                 cur.execute(
                     """
                     SELECT
-                        DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0) AS hour_bucket,
-                        domain,
-                        AVG(avg_value) AS mean_val,
-                        SUM(CAST(event_count AS BIGINT)) AS rec_count
-                    FROM dbo.domain_snapshots
-                    WHERE london_time >= %s AND london_time < %s
-                    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0), domain
+                        DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS hour_bucket,
+                        alan AS domain,
+                        AVG(ortalama_deger) AS mean_val,
+                        SUM(CAST(olay_sayisi AS BIGINT)) AS rec_count
+                    FROM dbo.alan_ozetleri
+                    WHERE londra_zamani >= %s AND londra_zamani < %s
+                    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0), alan
                     """,
                     (start_dt, end_exclusive),
                 )
@@ -97,13 +97,13 @@ def read_mssql_hourly(
                 cur.execute(
                     """
                     SELECT
-                        DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0) AS hour_bucket,
-                        domain,
-                        AVG(avg_value) AS mean_val,
-                        SUM(CAST(event_count AS BIGINT)) AS rec_count
-                    FROM dbo.district_measurements
-                    WHERE london_time >= %s AND london_time < %s AND district_id = %s
-                    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, london_time), 0), domain
+                        DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS hour_bucket,
+                        alan AS domain,
+                        AVG(ortalama_deger) AS mean_val,
+                        SUM(CAST(olay_sayisi AS BIGINT)) AS rec_count
+                    FROM dbo.bolge_olcumleri
+                    WHERE londra_zamani >= %s AND londra_zamani < %s AND bolge_id = %s
+                    GROUP BY DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0), alan
                     """,
                     (start_dt, end_exclusive, district_id),
                 )
@@ -169,11 +169,11 @@ def get_storage_summary() -> dict[str, Any]:
                 INNER JOIN sys.partitions p
                     ON t.object_id = p.object_id AND p.index_id IN (0, 1)
                 WHERE t.name IN (
-                    N'domain_snapshots',
-                    N'district_measurements',
-                    N'anomaly_alerts',
-                    N'batch_telemetry',
-                    N'platform_state'
+                    N'alan_ozetleri',
+                    N'bolge_olcumleri',
+                    N'anomali_uyarilari',
+                    N'batch_telemetri',
+                    N'platform_durumu'
                 )
                 GROUP BY t.name
                 """
@@ -194,13 +194,13 @@ def get_storage_summary() -> dict[str, Any]:
             if sz_row and sz_row.get("size_mb") is not None:
                 base["db_size_mb"] = round(float(sz_row["size_mb"]), 2)
 
-            if tables.get("domain_snapshots", 0) > 0:
+            if tables.get("alan_ozetleri", 0) > 0:
                 cur.execute(
                     """
                     SELECT
-                        MIN(london_time) AS earliest_ts,
-                        MAX(london_time) AS latest_ts
-                    FROM dbo.domain_snapshots
+                        MIN(londra_zamani) AS earliest_ts,
+                        MAX(londra_zamani) AS latest_ts
+                    FROM dbo.alan_ozetleri
                     """
                 )
                 tr = cur.fetchone()
@@ -213,9 +213,9 @@ def get_storage_summary() -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT
-                        SUM(CASE WHEN batch_id >= 0 THEN 1 ELSE 0 END) AS live_snapshots,
-                        SUM(CASE WHEN batch_id < 0 THEN 1 ELSE 0 END) AS backfill_snapshots
-                    FROM dbo.domain_snapshots
+                        SUM(CASE WHEN batch_no >= 0 THEN 1 ELSE 0 END) AS live_snapshots,
+                        SUM(CASE WHEN batch_no < 0 THEN 1 ELSE 0 END) AS backfill_snapshots
+                    FROM dbo.alan_ozetleri
                     """
                 )
                 sb = cur.fetchone()
@@ -225,12 +225,14 @@ def get_storage_summary() -> dict[str, Any]:
                         "backfill_snapshots": int(sb.get("backfill_snapshots") or 0),
                     }
 
-            if tables.get("platform_state", 0) > 0:
+            if tables.get("platform_durumu", 0) > 0:
                 cur.execute(
                     """
-                    SELECT cumulative_events, cumulative_alerts
-                    FROM dbo.platform_state
-                    WHERE state_key = N'spark_streaming'
+                    SELECT
+                        toplam_olay_sayisi AS cumulative_events,
+                        toplam_uyari_sayisi AS cumulative_alerts
+                    FROM dbo.platform_durumu
+                    WHERE durum_anahtari = N'spark_streaming'
                     """
                 )
                 st = cur.fetchone()
@@ -268,13 +270,13 @@ def query_saved_snapshots(
     params: list[Any] = []
 
     if domain:
-        clauses.append("domain = %s")
+        clauses.append("alan = %s")
         params.append(domain)
     if start_date:
-        clauses.append("london_time >= %s")
+        clauses.append("londra_zamani >= %s")
         params.append(datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0))
     if end_date:
-        clauses.append("london_time < %s")
+        clauses.append("londra_zamani < %s")
         params.append(datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0) + timedelta(days=1))
 
     conn = None
@@ -286,27 +288,48 @@ def query_saved_snapshots(
                 cur.execute(
                     f"""
                     SELECT TOP ({safe_limit})
-                        id, recorded_at, london_time, batch_id, domain, metric_name,
-                        avg_value, min_value, max_value, unit, event_count, data_source
-                    FROM dbo.domain_snapshots
+                        id,
+                        kayit_zamani_utc AS recorded_at,
+                        londra_zamani AS london_time,
+                        batch_no AS batch_id,
+                        alan AS domain,
+                        metrik_adi AS metric_name,
+                        ortalama_deger AS avg_value,
+                        en_dusuk_deger AS min_value,
+                        en_yuksek_deger AS max_value,
+                        birim AS unit,
+                        olay_sayisi AS event_count,
+                        veri_kaynagi AS data_source
+                    FROM dbo.alan_ozetleri
                     {where_sql}
-                    ORDER BY london_time DESC, id DESC
+                    ORDER BY londra_zamani DESC, id DESC
                     """,
                     tuple(params),
                 )
             else:
-                clauses.append("district_id = %s")
+                clauses.append("bolge_id = %s")
                 params.append(district_id)
                 where_sql = "WHERE " + " AND ".join(clauses)
                 cur.execute(
                     f"""
                     SELECT TOP ({safe_limit})
-                        id, recorded_at, london_time, batch_id, district_id, district_name,
-                        zone_type, domain, avg_value, min_value, max_value,
-                        event_count, status, tfl_disruptions
-                    FROM dbo.district_measurements
+                        id,
+                        kayit_zamani_utc AS recorded_at,
+                        londra_zamani AS london_time,
+                        batch_no AS batch_id,
+                        bolge_id AS district_id,
+                        bolge_adi AS district_name,
+                        bolge_tipi AS zone_type,
+                        alan AS domain,
+                        ortalama_deger AS avg_value,
+                        en_dusuk_deger AS min_value,
+                        en_yuksek_deger AS max_value,
+                        olay_sayisi AS event_count,
+                        durum AS status,
+                        tfl_yol_aksamasi AS tfl_disruptions
+                    FROM dbo.bolge_olcumleri
                     {where_sql}
-                    ORDER BY london_time DESC, id DESC
+                    ORDER BY londra_zamani DESC, id DESC
                     """,
                     tuple(params),
                 )
@@ -345,13 +368,13 @@ def query_saved_alerts(
     clauses: list[str] = []
     params: list[Any] = []
     if domain:
-        clauses.append("domain = %s")
+        clauses.append("alan = %s")
         params.append(domain)
     if district_id and district_id != "all":
-        clauses.append("district_id = %s")
+        clauses.append("bolge_id = %s")
         params.append(district_id)
     if severity:
-        clauses.append("severity = %s")
+        clauses.append("seviye = %s")
         params.append(severity)
 
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -362,12 +385,26 @@ def query_saved_alerts(
             cur.execute(
                 f"""
                 SELECT TOP ({safe_limit})
-                    id, alert_id, recorded_at, london_time, district_id, district_name,
-                    domain, metric_label, unit, severity, method, z_score,
-                    measured_value, baseline_value, threshold_label, message, injected
-                FROM dbo.anomaly_alerts
+                    id,
+                    uyari_id AS alert_id,
+                    kayit_zamani_utc AS recorded_at,
+                    londra_zamani AS london_time,
+                    bolge_id AS district_id,
+                    bolge_adi AS district_name,
+                    alan AS domain,
+                    metrik_etiketi AS metric_label,
+                    birim AS unit,
+                    seviye AS severity,
+                    tespit_yontemi AS method,
+                    z_skoru AS z_score,
+                    olculen_deger AS measured_value,
+                    referans_deger AS baseline_value,
+                    esik_etiketi AS threshold_label,
+                    aciklama AS message,
+                    test_enjekte AS injected
+                FROM dbo.anomali_uyarilari
                 {where_sql}
-                ORDER BY recorded_at DESC, id DESC
+                ORDER BY kayit_zamani_utc DESC, id DESC
                 """,
                 tuple(params),
             )

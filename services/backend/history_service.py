@@ -18,6 +18,8 @@ import hashlib
 import json
 import logging
 import math
+import threading
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -26,8 +28,10 @@ from typing import Any
 import httpx
 
 try:
+    import pyarrow.dataset as ds
     import pyarrow.parquet as pq
 except ImportError:  # pragma: no cover - optional in slim local environments
+    ds = None
     pq = None
 
 from mssql_reader import read_mssql_hourly
@@ -57,6 +61,43 @@ TR_MONTHS_SHORT = {
 }
 
 _DISTRICTS_CACHE: list[dict[str, Any]] | None = None
+
+# Thread-safe in-memory cache for Parquet domain partition summaries.
+# Key: str(dom_dir) -> (mtime_ns, {district_id: (sum, count)}, total_sum, total_count)
+_LAKE_DOMAIN_CACHE: dict[str, tuple[int, dict[str, tuple[float, int]], float, int]] = {}
+_LAKE_CACHE_LOCK = threading.Lock()
+_LAKE_CACHE_MAX_ENTRIES = 5000
+
+# In-memory TTL cache for external historical API responses (shared across districts for Elexon/NESO).
+# Key: tuple -> (expires_at_monotonic, data, ok_flag)
+_API_CACHE: dict[tuple[Any, ...], tuple[float, Any, bool]] = {}
+_API_CACHE_MAX_ENTRIES = 256
+
+
+def _api_cache_get(key: tuple[Any, ...]) -> tuple[Any, bool] | None:
+    entry = _API_CACHE.get(key)
+    if entry is None:
+        return None
+    expires_at, data, ok = entry
+    if time.monotonic() >= expires_at:
+        _API_CACHE.pop(key, None)
+        return None
+    return data, ok
+
+
+def _api_cache_set(key: tuple[Any, ...], data: Any, ok: bool, ttl_sec: float) -> None:
+    if not ok:
+        return
+    if len(_API_CACHE) >= _API_CACHE_MAX_ENTRIES:
+        # Evict oldest ~25% entries
+        now = time.monotonic()
+        expired = [k for k, (exp, _, _) in _API_CACHE.items() if exp <= now]
+        for k in expired:
+            _API_CACHE.pop(k, None)
+        if len(_API_CACHE) >= _API_CACHE_MAX_ENTRIES:
+            for k in list(_API_CACHE.keys())[: _API_CACHE_MAX_ENTRIES // 4]:
+                _API_CACHE.pop(k, None)
+    _API_CACHE[key] = (time.monotonic() + ttl_sec, data, ok)
 
 
 def _uk_utc_offset(dt_utc: datetime) -> timedelta:
@@ -203,6 +244,87 @@ def build_expected_hour_keys(start_date: date, end_date: date, now_london: datet
     return keys
 
 
+def _summarize_domain_dir(dom_dir: Path) -> tuple[dict[str, tuple[float, int]], float, int]:
+    """Vectorized PyArrow aggregation of a single dt=.../domain=... directory with mtime caching."""
+    cache_key = str(dom_dir)
+    try:
+        mtime_ns = dom_dir.stat().st_mtime_ns
+    except OSError:
+        return {}, 0.0, 0
+
+    with _LAKE_CACHE_LOCK:
+        cached = _LAKE_DOMAIN_CACHE.get(cache_key)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1], cached[2], cached[3]
+
+    per_district: dict[str, tuple[float, int]] = {}
+    total_sum = 0.0
+    total_cnt = 0
+
+    # Fast path: C++ vectorized pyarrow.dataset + group_by aggregation
+    used_fast_path = False
+    if ds is not None:
+        try:
+            dataset = ds.dataset(dom_dir, format="parquet")
+            table = dataset.to_table(columns=["district_id", "value"])
+            if table.num_rows > 0:
+                agg = table.group_by("district_id").aggregate([("value", "sum"), ("value", "count")])
+                dids = agg.column("district_id").to_pylist()
+                vsums = agg.column("value_sum").to_pylist()
+                vcnts = agg.column("value_count").to_pylist()
+                for did, s_val, c_val in zip(dids, vsums, vcnts):
+                    if did is None or s_val is None or not c_val:
+                        continue
+                    fs = float(s_val)
+                    ic = int(c_val)
+                    if math.isnan(fs) or ic <= 0:
+                        continue
+                    per_district[str(did)] = (fs, ic)
+                    total_sum += fs
+                    total_cnt += ic
+            used_fast_path = True
+        except Exception as exc:
+            logger.debug("Dataset fast-path fallback for %s: %s", dom_dir, exc)
+
+    # Fallback path: per-file read (handles partial/corrupt files gracefully)
+    if not used_fast_path and pq is not None:
+        d_sums: dict[str, float] = defaultdict(float)
+        d_cnts: dict[str, int] = defaultdict(int)
+        for pfile in dom_dir.glob("*.parquet"):
+            try:
+                table = pq.read_table(pfile, columns=["district_id", "value"])
+                if table.num_rows == 0:
+                    continue
+                agg = table.group_by("district_id").aggregate([("value", "sum"), ("value", "count")])
+                for did, s_val, c_val in zip(
+                    agg.column("district_id").to_pylist(),
+                    agg.column("value_sum").to_pylist(),
+                    agg.column("value_count").to_pylist(),
+                ):
+                    if did is None or s_val is None or not c_val:
+                        continue
+                    fs = float(s_val)
+                    ic = int(c_val)
+                    if math.isnan(fs) or ic <= 0:
+                        continue
+                    s_did = str(did)
+                    d_sums[s_did] += fs
+                    d_cnts[s_did] += ic
+                    total_sum += fs
+                    total_cnt += ic
+            except Exception as exc:
+                logger.debug("Skipping unreadable parquet file %s: %s", pfile, exc)
+        per_district = {k: (d_sums[k], d_cnts[k]) for k in d_sums}
+
+    with _LAKE_CACHE_LOCK:
+        if len(_LAKE_DOMAIN_CACHE) >= _LAKE_CACHE_MAX_ENTRIES:
+            for k in list(_LAKE_DOMAIN_CACHE.keys())[: _LAKE_CACHE_MAX_ENTRIES // 4]:
+                _LAKE_DOMAIN_CACHE.pop(k, None)
+        _LAKE_DOMAIN_CACHE[cache_key] = (mtime_ns, per_district, total_sum, total_cnt)
+
+    return per_district, total_sum, total_cnt
+
+
 def read_lake_hourly(
     lake_dir: str | Path,
     start_date: date,
@@ -211,9 +333,7 @@ def read_lake_hourly(
 ) -> tuple[dict[str, dict[str, float]], dict[str, Any]]:
     """Read & aggregate archived Spark Parquet partitions for the requested date window.
 
-    Returns:
-      - hourly_by_key: { "YYYY-MM-DDTHH:00": { "traffic": avg, "weather": avg, ... } }
-      - stats: { "available": bool, "partitions_scanned": int, "records_read": int, "domains_hours": {...} }
+    Uses vectorized PyArrow C++ group-by + mtime-validated in-memory partition summary cache.
     """
     parquet_root = Path(lake_dir) / "parquet"
     stats: dict[str, Any] = {
@@ -226,8 +346,6 @@ def read_lake_hourly(
         return {}, stats
 
     stats["available"] = True
-    # Partition folder names are UTC hour buckets: dt=YYYY-MM-DD-HH
-    # Expand by +/- 1 day in UTC to safely cover BST/GMT boundaries.
     min_utc = datetime(start_date.year, start_date.month, start_date.day, 0, 0, tzinfo=timezone.utc) - timedelta(hours=2)
     max_utc = datetime(end_date.year, end_date.month, end_date.day, 23, 59, tzinfo=timezone.utc) + timedelta(hours=2)
 
@@ -261,25 +379,18 @@ def read_lake_hourly(
             domain = dom_dir.name.removeprefix("domain=")
             if domain not in valid_domains or not dom_dir.is_dir():
                 continue
-            parquet_files = list(dom_dir.glob("*.parquet"))
-            for pfile in parquet_files:
-                try:
-                    table = pq.read_table(pfile, columns=["district_id", "value"])
-                    dids = table.column("district_id").to_pylist()
-                    vals = table.column("value").to_pylist()
-                    for did, val in zip(dids, vals):
-                        if val is None:
-                            continue
-                        if district_id != "all" and did != district_id:
-                            continue
-                        fval = float(val)
-                        if math.isnan(fval):
-                            continue
-                        sums[(hour_key, domain)] += fval
-                        counts[(hour_key, domain)] += 1
-                        stats["records_read"] += 1
-                except Exception as exc:
-                    logger.debug("Skipping unreadable parquet file %s: %s", pfile, exc)
+            per_district, total_sum, total_cnt = _summarize_domain_dir(dom_dir)
+            if district_id == "all":
+                if total_cnt > 0:
+                    sums[(hour_key, domain)] += total_sum
+                    counts[(hour_key, domain)] += total_cnt
+                    stats["records_read"] += total_cnt
+            else:
+                d_entry = per_district.get(district_id)
+                if d_entry is not None and d_entry[1] > 0:
+                    sums[(hour_key, domain)] += d_entry[0]
+                    counts[(hour_key, domain)] += d_entry[1]
+                    stats["records_read"] += d_entry[1]
 
     hourly_by_key: dict[str, dict[str, float]] = defaultdict(dict)
     for (hour_key, domain), total in sums.items():
@@ -719,6 +830,7 @@ async def query_historical_data(
     granularity: str = "auto",
     latest_state: dict[str, Any] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    bypass_api_cache: bool = False,
 ) -> dict[str, Any]:
     """Build complete historical analytics payload combining Data Lake + real historical APIs."""
     now_lon = london_now()
@@ -771,18 +883,45 @@ async def query_historical_data(
     lake_task = asyncio.to_thread(read_lake_hourly, lake_dir, s_date, e_date, district_id)
     mssql_task = asyncio.to_thread(read_mssql_hourly, s_date, e_date, district_id)
 
+    api_ttl = 300.0 if e_date >= today_lon else 3600.0
+    s_iso = s_date.isoformat()
+    e_iso = e_date.isoformat()
+    lat_r = round(lat, 3)
+    lon_r = round(lon, 3)
+
+    async def _cached_fetch(cache_key: tuple[Any, ...], coro_factory):
+        if not bypass_api_cache:
+            hit = _api_cache_get(cache_key)
+            if hit is not None:
+                return hit
+        data, ok = await coro_factory()
+        _api_cache_set(cache_key, data, ok, api_ttl)
+        return data, ok
+
     async def _fetch_all_apis(client: httpx.AsyncClient):
         return await asyncio.gather(
-            _fetch_open_meteo_weather(client, lat, lon, s_date, e_date, today_lon),
-            _fetch_open_meteo_air_quality(client, lat, lon, s_date, e_date),
-            _fetch_elexon_demand(client, s_date, e_date),
-            _fetch_neso_london_carbon(client, s_date, e_date),
+            _cached_fetch(
+                ("weather", lat_r, lon_r, s_iso, e_iso),
+                lambda: _fetch_open_meteo_weather(client, lat, lon, s_date, e_date, today_lon),
+            ),
+            _cached_fetch(
+                ("aqi", lat_r, lon_r, s_iso, e_iso),
+                lambda: _fetch_open_meteo_air_quality(client, lat, lon, s_date, e_date),
+            ),
+            _cached_fetch(
+                ("elexon", s_iso, e_iso),
+                lambda: _fetch_elexon_demand(client, s_date, e_date),
+            ),
+            _cached_fetch(
+                ("neso", s_iso, e_iso),
+                lambda: _fetch_neso_london_carbon(client, s_date, e_date),
+            ),
         )
 
     if http_client is not None:
         lake_res, mssql_res, api_res = await asyncio.gather(lake_task, mssql_task, _fetch_all_apis(http_client))
     else:
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0), follow_redirects=True) as client:
             lake_res, mssql_res, api_res = await asyncio.gather(lake_task, mssql_task, _fetch_all_apis(client))
 
     lake_hourly, lake_stats = lake_res

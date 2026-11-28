@@ -54,6 +54,8 @@ def _reset_streaming_state() -> None:
     streaming_app.WINDOW_HISTORY.clear()
     streaming_app.DISTRICT_ENERGY_BASE.clear()
     streaming_app.DISTRICT_ENERGY_BASE["westminster"] = 1000.0
+    for dom in streaming_app.VALID_DOMAINS:
+        streaming_app.LATEST_DOMAIN_DISTRICT_METRICS[dom] = {}
 
 
 def test_threshold_traffic_critical_and_warning() -> None:
@@ -123,3 +125,103 @@ def test_zscore_warmup_and_spike_detection() -> None:
     hit_spike, z_spike, _ = streaming_app.evaluate_zscore(key, 8.0)
     assert hit_spike is True
     assert z_spike < -3.2
+
+
+def _make_row(domain: str, did: str, val: float, **extras: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "domain": domain,
+        "district_id": did,
+        "avg_value": val,
+        "min_value": val - 0.1,
+        "max_value": val + 0.1,
+        "metric_name": f"{domain}_metric",
+        "unit": "u",
+        "data_source": "test (live)",
+        "avg_congestion_pct": None,
+        "avg_vehicle_count": None,
+        "disrupted_corridors": 0,
+        "avg_humidity_pct": None,
+        "avg_wind_speed_ms": None,
+        "avg_pm2_5": None,
+        "avg_pm10": None,
+        "avg_renewable_pct": None,
+        "avg_low_carbon_pct": None,
+        "avg_national_load_mw": None,
+        "avg_london_total_mw": None,
+        "avg_carbon_intensity": None,
+    }
+    row.update(extras)
+    return row
+
+
+def test_city_domain_summary_aggregates_all_32_districts_across_partial_batches() -> None:
+    districts_by_id = {
+        f"d{i:02d}": {"district_id": f"d{i:02d}", "energy_weight": 1.0 / 32.0}
+        for i in range(32)
+    }
+
+    # Feed 4 partial batches of 8 districts each for all 4 domains
+    for batch_idx in range(4):
+        start = batch_idx * 8
+        slice_ids = [f"d{i:02d}" for i in range(start, start + 8)]
+
+        traffic_rows = [
+            _make_row(
+                "traffic",
+                did,
+                20.0 + idx,
+                avg_congestion_pct=40.0 + idx,
+                avg_vehicle_count=50.0 + idx,
+                disrupted_corridors=2 if batch_idx < 3 else 1,
+            )
+            for idx, did in enumerate(slice_ids, start=start)
+        ]
+        weather_rows = [
+            _make_row("weather", did, 5.0 + (idx % 4) * 0.4, avg_humidity_pct=80.0, avg_wind_speed_ms=4.5)
+            for idx, did in enumerate(slice_ids, start=start)
+        ]
+        aq_rows = [
+            _make_row("air_quality", did, 16.0 + idx, avg_pm2_5=4.0 + idx * 0.1, avg_pm10=8.0 + idx * 0.2)
+            for idx, did in enumerate(slice_ids, start=start)
+        ]
+        energy_rows = [
+            _make_row(
+                "energy",
+                did,
+                100.0 + idx * 4.0,
+                avg_renewable_pct=35.0,
+                avg_low_carbon_pct=50.0,
+                avg_national_load_mw=32000.0,
+                avg_london_total_mw=4480.0,
+                avg_carbon_intensity=140.0,
+            )
+            for idx, did in enumerate(slice_ids, start=start)
+        ]
+
+        t_sum = streaming_app.update_city_domain_summary("traffic", traffic_rows, 8, districts_by_id)
+        w_sum = streaming_app.update_city_domain_summary("weather", weather_rows, 8, districts_by_id)
+        a_sum = streaming_app.update_city_domain_summary("air_quality", aq_rows, 8, districts_by_id)
+        e_sum = streaming_app.update_city_domain_summary("energy", energy_rows, 8, districts_by_id)
+
+    assert t_sum is not None and w_sum is not None and a_sum is not None and e_sum is not None
+    # After 4 batches, all 32 districts are covered for all 4 domains
+    for s in (t_sum, w_sum, a_sum, e_sum):
+        assert s["districts_covered"] == 32
+        assert s["event_count"] == 8
+
+    assert t_sum["avg_value"] == round(sum(20.0 + i for i in range(32)) / 32, 2)
+    assert t_sum["secondary"]["disrupted_corridors"] == 1
+    assert w_sum["avg_value"] == round(sum(5.0 + (i % 4) * 0.4 for i in range(32)) / 32, 2)
+    assert w_sum["secondary"]["humidity_pct"] == 80.0
+    assert a_sum["avg_value"] == round(sum(16.0 + i for i in range(32)) / 32, 2)
+    assert e_sum["avg_value"] == round(sum(100.0 + i * 4.0 for i in range(32)) / 32, 2)
+
+    # A subsequent batch updating only the first 8 districts keeps all 32 districts in the city average
+    next_weather = [
+        _make_row("weather", f"d{i:02d}", 5.0 + (i % 4) * 0.4, avg_humidity_pct=80.0, avg_wind_speed_ms=4.5)
+        for i in range(8)
+    ]
+    w_next = streaming_app.update_city_domain_summary("weather", next_weather, 8, districts_by_id)
+    assert w_next is not None
+    assert w_next["districts_covered"] == 32
+    assert w_next["avg_value"] == w_sum["avg_value"]

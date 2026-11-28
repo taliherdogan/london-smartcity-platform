@@ -50,7 +50,7 @@ docker compose up -d --build
   - **Server:** `localhost,1434` *(yerel SQL Server'ın 1433 portuyla çakışmaması için 1434)*
   - **Authentication:** SQL Server Authentication
   - **Login:** `sa` | **Password:** `SmartCity#2026!` *(veya `.env` içindeki `MSSQL_SA_PASSWORD`)*
-  - **Database:** `SmartCityDB` (`dbo.domain_snapshots`, `dbo.district_measurements`, `dbo.anomaly_alerts`, `dbo.batch_telemetry`, `dbo.vw_hourly_city_summary`, `dbo.vw_latest_district_status`, `dbo.vw_recent_alerts`)
+  - **Database:** `SmartCityDB` (`dbo.alan_ozetleri`, `dbo.bolge_olcumleri`, `dbo.anomali_uyarilari`, `dbo.batch_telemetri`, `dbo.platform_durumu`, `dbo.vw_saatlik_sehir_ozeti`, `dbo.vw_son_bolge_durumu`, `dbo.vw_son_uyarilar` — tüm tablo, görünüm ve sütunlar Türkçe ASCII `snake_case` standardındadır)
   - **Önemli:** Container'ları yeniden oluştururken verileri korumak için `docker compose down` / `docker compose up -d --build` kullanın; volume'ları silen `docker compose down -v` komutunu kullanmayın.
 
 ### Çok Ölçekli Batch (CSV vs Parquet) & Çok Hızlı Streaming Benchmark

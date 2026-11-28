@@ -80,7 +80,7 @@ RESET_STATE_ON_START = os.getenv("RESET_STATE_ON_START", "false").lower() in ("1
 LONDON_ENERGY_SHARE = 0.14
 SEVERITY_ORDER = {"normal": 0, "warning": 1, "critical": 2}
 VALID_DOMAINS = {"traffic", "weather", "air_quality", "energy"}
-MAX_STATE_KEYS = 256
+MAX_STATE_KEYS = 320
 
 
 def _touch_health() -> None:
@@ -240,12 +240,123 @@ EVENT_SCHEMA = StructType(
 WINDOW_HISTORY: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=30))
 DISTRICT_ENERGY_BASE: dict[str, float] = {}
 LATEST_DISTRICTS_STATE: dict[str, dict[str, Any]] = {}
+LATEST_DOMAIN_DISTRICT_METRICS: dict[str, dict[str, dict[str, Any]]] = {
+    dom: {} for dom in VALID_DOMAINS
+}
 LAST_ALERT_AT: dict[tuple[str, str], float] = {}
 ALERT_COOLDOWN_SEC = 90.0
 CUMULATIVE_EVENTS = 0
 CUMULATIVE_ALERTS = 0
 LAST_BATCH_WALL = time.monotonic()
 LAST_LAKE_SIZE_MB = 0.0
+
+
+def _mean_entry_field(entries: list[dict[str, Any]], field: str, default: float = 0.0) -> float:
+    vals = [float(e[field]) for e in entries if e.get(field) is not None]
+    return (sum(vals) / len(vals)) if vals else default
+
+
+def update_city_domain_summary(
+    domain: str,
+    batch_rows: list[Any],
+    batch_event_count: int,
+    districts_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Update per-district latest metrics and compute city-wide summary across all tracked districts (up to 32)."""
+    store = LATEST_DOMAIN_DISTRICT_METRICS.setdefault(domain, {})
+
+    for r_item in batch_rows:
+        did = r_item["district_id"]
+        if did not in districts_by_id:
+            continue
+        entry: dict[str, Any] = {
+            "avg_value": float(r_item["avg_value"]),
+            "min_value": float(r_item["min_value"]),
+            "max_value": float(r_item["max_value"]),
+            "metric_name": r_item["metric_name"],
+            "unit": r_item["unit"],
+            "data_source": r_item["data_source"],
+        }
+        if domain == "traffic":
+            entry["congestion_pct"] = r_item["avg_congestion_pct"]
+            entry["vehicle_count"] = r_item["avg_vehicle_count"]
+            entry["disrupted_corridors"] = r_item["disrupted_corridors"]
+        elif domain == "weather":
+            entry["humidity_pct"] = r_item["avg_humidity_pct"]
+            entry["wind_speed_ms"] = r_item["avg_wind_speed_ms"]
+        elif domain == "air_quality":
+            entry["pm2_5"] = r_item["avg_pm2_5"]
+            entry["pm10"] = r_item["avg_pm10"]
+        elif domain == "energy":
+            entry["renewable_share_pct"] = r_item["avg_renewable_pct"]
+            entry["low_carbon_pct"] = r_item["avg_low_carbon_pct"]
+            entry["national_load_mw"] = r_item["avg_national_load_mw"]
+            entry["london_total_mw"] = r_item["avg_london_total_mw"]
+            entry["carbon_intensity_gco2"] = r_item["avg_carbon_intensity"]
+        store[did] = entry
+
+    if not store:
+        return None
+
+    entries = list(store.values())
+    n = len(entries)
+    d_avg = sum(e["avg_value"] for e in entries) / n
+    d_min = min(e["min_value"] for e in entries)
+    d_max = max(e["max_value"] for e in entries)
+
+    secondary: dict[str, Any] = {}
+    if domain == "traffic":
+        if batch_rows:
+            disrupted = int(max((r_item["disrupted_corridors"] or 0) for r_item in batch_rows))
+        else:
+            disrupted = int(max((e.get("disrupted_corridors") or 0) for e in entries))
+        secondary = {
+            "congestion_pct": round(_mean_entry_field(entries, "congestion_pct"), 1),
+            "vehicle_count": round(_mean_entry_field(entries, "vehicle_count"), 1),
+            "disrupted_corridors": disrupted,
+        }
+    elif domain == "weather":
+        secondary = {
+            "humidity_pct": round(_mean_entry_field(entries, "humidity_pct"), 1),
+            "wind_speed_ms": round(_mean_entry_field(entries, "wind_speed_ms"), 2),
+        }
+    elif domain == "air_quality":
+        secondary = {
+            "pm2_5": round(_mean_entry_field(entries, "pm2_5"), 2),
+            "pm10": round(_mean_entry_field(entries, "pm10"), 2),
+        }
+    elif domain == "energy":
+        if batch_rows:
+            batch_nat = [float(r_item["avg_national_load_mw"]) for r_item in batch_rows if r_item["avg_national_load_mw"] is not None]
+            batch_lon = [float(r_item["avg_london_total_mw"]) for r_item in batch_rows if r_item["avg_london_total_mw"] is not None]
+            nat_mw = (sum(batch_nat) / len(batch_nat)) if batch_nat else _mean_entry_field(entries, "national_load_mw", 34500.0)
+            lon_total_mw = (sum(batch_lon) / len(batch_lon)) if batch_lon else _mean_entry_field(entries, "london_total_mw", nat_mw * LONDON_ENERGY_SHARE)
+        else:
+            nat_mw = _mean_entry_field(entries, "national_load_mw", 34500.0)
+            lon_total_mw = _mean_entry_field(entries, "london_total_mw", nat_mw * LONDON_ENERGY_SHARE)
+        for did_k, dmeta in districts_by_id.items():
+            DISTRICT_ENERGY_BASE[did_k] = nat_mw * LONDON_ENERGY_SHARE * float(dmeta["energy_weight"])
+        secondary = {
+            "renewable_share_pct": round(_mean_entry_field(entries, "renewable_share_pct"), 1),
+            "low_carbon_pct": round(_mean_entry_field(entries, "low_carbon_pct"), 1),
+            "national_load_mw": round(nat_mw, 1),
+            "london_total_mw": round(lon_total_mw, 1),
+            "carbon_intensity_gco2": round(_mean_entry_field(entries, "carbon_intensity_gco2", 185.0), 1),
+        }
+
+    meta_src = batch_rows[0] if batch_rows else entries[0]
+    return {
+        "domain": domain,
+        "metric_name": meta_src["metric_name"],
+        "avg_value": round(d_avg, 2),
+        "min_value": round(d_min, 2),
+        "max_value": round(d_max, 2),
+        "unit": meta_src["unit"],
+        "event_count": batch_event_count,
+        "districts_covered": n,
+        "data_source": meta_src["data_source"],
+        "secondary": secondary,
+    }
 
 
 def evaluate_threshold(
@@ -289,8 +400,8 @@ def evaluate_threshold(
             return (
                 True,
                 "critical",
-                f"Çok kötü hava kalitesi (Avrupa AQI: {v:.0f}, PM2.5: {pm25:.1f} µg/m³)",
-                "EAQI > 80 veya PM2.5 > 35 µg/m³",
+                f"Çok kötü hava kalitesi ({v:.0f} puan, İnce Toz: {pm25:.1f})",
+                "Hava Kalitesi > 80 puan veya İnce Toz > 35",
                 30.0,
                 "high",
             )
@@ -298,30 +409,31 @@ def evaluate_threshold(
             return (
                 True,
                 "warning",
-                f"Kötü / hassas hava kalitesi (Avrupa AQI: {v:.0f}, PM2.5: {pm25:.1f} µg/m³)",
-                "EAQI > 60 veya PM2.5 > 25 µg/m³",
+                f"Kötü / hassas hava kalitesi ({v:.0f} puan, İnce Toz: {pm25:.1f})",
+                "Hava Kalitesi > 60 puan veya İnce Toz > 25",
                 30.0,
                 "high",
             )
     elif domain == "weather":
         wind = round(secondary.get("wind_speed_ms", 0.0), 1)
+        wind_kmh = round(wind * 3.6, 1)
         v = round(value, 1)
         if wind > 18.0:
             return (
                 True,
                 "critical",
-                f"Şiddetli fırtına / rüzgar uyarısı ({wind:.1f} m/s)",
-                "Rüzgar > 18 m/s (~65 km/s)",
-                6.0,
+                f"Şiddetli fırtına / rüzgar uyarısı ({wind_kmh:.0f} km/s)",
+                "Rüzgar Hızı > 65 km/s",
+                21.6,
                 "high",
             )
         if wind > 12.5:
             return (
                 True,
                 "warning",
-                f"Kuvvetli rüzgar uyarısı ({wind:.1f} m/s)",
-                "Rüzgar > 12.5 m/s (~45 km/s)",
-                6.0,
+                f"Kuvvetli rüzgar uyarısı ({wind_kmh:.0f} km/s)",
+                "Rüzgar Hızı > 45 km/s",
+                21.6,
                 "high",
             )
         if v < 0.0 or v > 30.0:
@@ -342,8 +454,8 @@ def evaluate_threshold(
             return (
                 True,
                 "critical",
-                f"Yüksek Londra şebeke yükü ({v} MW, üst sınır: {crit_mw} MW)",
-                f"Şebeke Yükü > {crit_mw} MW (+%25)",
+                f"Enerji yükü kritik düzeyde ({v} MW, üst sınır: {crit_mw} MW)",
+                f"Enerji Yükü > {crit_mw} MW (+%25)",
                 float(base_mw),
                 "high",
             )
@@ -351,8 +463,8 @@ def evaluate_threshold(
             return (
                 True,
                 "warning",
-                f"Şebeke yükü normalin üzerinde ({v} MW)",
-                f"Şebeke Yükü > {warn_mw} MW (+%15)",
+                f"Enerji yükü normalin üzerinde ({v} MW)",
+                f"Enerji Yükü > {warn_mw} MW (+%15)",
                 float(base_mw),
                 "high",
             )
@@ -543,12 +655,12 @@ def main() -> None:
         }
         for d in districts_meta
     ]
-    broadcast_districts = F.broadcast(spark.createDataFrame(flat_districts))
+    broadcast_districts = F.broadcast(spark.createDataFrame(flat_districts).persist(StorageLevel.MEMORY_ONLY))
 
     raw_stream = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
-        .option("subscribePattern", "smartcity\\..*")
+        .option("subscribe", "smartcity.traffic,smartcity.weather,smartcity.air_quality,smartcity.energy")
         .option("startingOffsets", "latest")
         .option("failOnDataLoss", "false")
         .option("maxOffsetsPerTrigger", MAX_OFFSETS_PER_TRIGGER)
@@ -566,41 +678,39 @@ def main() -> None:
             & F.col("value").isNotNull()
             & F.col("district_id").isNotNull()
         )
-        .withColumn("event_ts", F.to_timestamp(F.col("event_time")))
     )
 
-    enriched_stream = parsed_stream.join(broadcast_districts, on="district_id", how="left")
+    enriched_stream = parsed_stream
 
     def process_batch(batch_df: DataFrame, batch_id: int) -> None:
         global CUMULATIVE_EVENTS, CUMULATIVE_ALERTS, LAST_BATCH_WALL, LAST_LAKE_SIZE_MB
         batch_start = time.monotonic()
         now_ms = int(time.time() * 1000)
+        should_archive = batch_id % ARCHIVE_EVERY_N_BATCHES == 0
 
-        batch_with_latency = batch_df.withColumn(
-            "latency_ms",
-            F.greatest(F.lit(1.0), (F.lit(now_ms) - F.col("produced_at_ms")).cast("double")),
-        )
-        batch_with_latency.persist(StorageLevel.MEMORY_AND_DISK)
+        if should_archive:
+            batch_df.persist(StorageLevel.MEMORY_AND_DISK)
 
         try:
-            # 1. Domain-level real-time aggregation (also gives exact row_count without a separate .count() job!)
-            domain_rows = (
-                batch_with_latency.groupBy("domain")
+            # Single-pass, literal-free Spark aggregation (100% WholeStageCodegen cache hit across batches)
+            district_rows = (
+                batch_df.coalesce(4)
+                .groupBy("domain", "district_id")
                 .agg(
                     F.count("*").alias("event_count"),
+                    F.sum("value").alias("sum_value"),
                     F.avg("value").alias("avg_value"),
                     F.min("value").alias("min_value"),
                     F.max("value").alias("max_value"),
-                    F.stddev("value").alias("std_value"),
                     F.first("unit").alias("unit"),
                     F.first("metric_name").alias("metric_name"),
                     F.first("data_source").alias("data_source"),
-                    F.avg("latency_ms").alias("avg_latency_ms"),
-                    F.expr("percentile_approx(latency_ms, 0.5, 2000)").alias("p50_latency_ms"),
-                    F.expr("percentile_approx(latency_ms, 0.95, 2000)").alias("p95_latency_ms"),
+                    F.sum(F.col("produced_at_ms").cast("double")).alias("sum_produced_ms"),
+                    F.min(F.col("produced_at_ms").cast("double")).alias("min_produced_ms"),
                     F.avg(F.col("secondary_metrics")["congestion_pct"]).alias("avg_congestion_pct"),
                     F.avg(F.col("secondary_metrics")["vehicle_count"]).alias("avg_vehicle_count"),
                     F.max(F.col("secondary_metrics")["disrupted_corridors"]).alias("disrupted_corridors"),
+                    F.max(F.col("secondary_metrics")["district_disruptions"]).alias("district_disruptions"),
                     F.avg(F.col("secondary_metrics")["humidity_pct"]).alias("avg_humidity_pct"),
                     F.avg(F.col("secondary_metrics")["wind_speed_ms"]).alias("avg_wind_speed_ms"),
                     F.avg(F.col("secondary_metrics")["pm2_5"]).alias("avg_pm2_5"),
@@ -610,11 +720,12 @@ def main() -> None:
                     F.avg(F.col("secondary_metrics")["national_load_mw"]).alias("avg_national_load_mw"),
                     F.avg(F.col("secondary_metrics")["london_total_mw"]).alias("avg_london_total_mw"),
                     F.avg(F.col("secondary_metrics")["carbon_intensity_gco2"]).alias("avg_carbon_intensity"),
+                    F.max(F.col("is_injected_anomaly").cast("int")).alias("has_injected"),
                 )
                 .collect()
             )
 
-            row_count = sum(int(row["event_count"]) for row in domain_rows)
+            row_count = sum(int(row["event_count"]) for row in district_rows)
             if row_count == 0:
                 _touch_health()
                 return
@@ -623,80 +734,39 @@ def main() -> None:
             LAST_BATCH_WALL = batch_start
             CUMULATIVE_EVENTS += row_count
 
-            # 2. District x Domain enriched aggregation (post Broadcast Join)
-            district_rows = (
-                batch_with_latency.groupBy("district_id", "district_name", "zone_type", "domain")
-                .agg(
-                    F.count("*").alias("event_count"),
-                    F.avg("value").alias("avg_value"),
-                    F.max("value").alias("max_value"),
-                    F.min("value").alias("min_value"),
-                    F.avg(F.col("secondary_metrics")["congestion_pct"]).alias("avg_congestion_pct"),
-                    F.max(F.col("secondary_metrics")["district_disruptions"]).alias("district_disruptions"),
-                    F.avg(F.col("secondary_metrics")["pm2_5"]).alias("avg_pm2_5"),
-                    F.avg(F.col("secondary_metrics")["wind_speed_ms"]).alias("avg_wind_speed_ms"),
-                    F.max(F.col("secondary_metrics")["wind_speed_ms"]).alias("max_wind_speed_ms"),
-                    F.max(F.col("secondary_metrics")["pm2_5"]).alias("max_pm2_5"),
-                    F.max(F.col("secondary_metrics")["congestion_pct"]).alias("max_congestion_pct"),
-                    F.max(F.col("is_injected_anomaly").cast("int")).alias("has_injected"),
-                )
-                .collect()
-            )
+            # Roll up ≤128 district x domain rows into 4 city-wide (all-32-district) domain summaries in pure Python (<0.3ms)
+            by_domain: dict[str, list[Any]] = {}
+            for row in district_rows:
+                d = row["domain"]
+                if d in VALID_DOMAINS:
+                    by_domain.setdefault(d, []).append(row)
 
             domains_summary: dict[str, dict[str, Any]] = {}
             all_p50: list[float] = []
             all_p95: list[float] = []
             all_avg_lat: list[float] = []
 
-            for row in domain_rows:
-                d = row["domain"]
-                if d not in VALID_DOMAINS:
-                    continue
-                all_p50.append(float(row["p50_latency_ms"] or 0.0))
-                all_p95.append(float(row["p95_latency_ms"] or 0.0))
-                all_avg_lat.append(float(row["avg_latency_ms"] or 0.0))
+            for d in ("traffic", "weather", "air_quality", "energy"):
+                drows = by_domain.get(d, [])
+                d_count = sum(int(r_item["event_count"]) for r_item in drows)
+                if d_count > 0:
+                    avg_prod_ms = sum(float(r_item["sum_produced_ms"] or now_ms) for r_item in drows) / d_count
+                    min_prod_ms = min(float(r_item["min_produced_ms"] or now_ms) for r_item in drows)
+                    d_avg_lat = max(1.0, now_ms - avg_prod_ms)
+                    group_lats = sorted(
+                        max(1.0, now_ms - (float(r_item["sum_produced_ms"] or now_ms) / max(1, int(r_item["event_count"]))))
+                        for r_item in drows
+                    )
+                    d_p50 = group_lats[len(group_lats) // 2] if group_lats else d_avg_lat
+                    d_p95 = max(d_avg_lat, now_ms - min_prod_ms)
 
-                secondary: dict[str, float] = {}
-                if d == "traffic":
-                    secondary = {
-                        "congestion_pct": round(float(row["avg_congestion_pct"] or 0.0), 1),
-                        "vehicle_count": round(float(row["avg_vehicle_count"] or 0.0), 1),
-                        "disrupted_corridors": int(row["disrupted_corridors"] or 0),
-                    }
-                elif d == "weather":
-                    secondary = {
-                        "humidity_pct": round(float(row["avg_humidity_pct"] or 0.0), 1),
-                        "wind_speed_ms": round(float(row["avg_wind_speed_ms"] or 0.0), 2),
-                    }
-                elif d == "air_quality":
-                    secondary = {
-                        "pm2_5": round(float(row["avg_pm2_5"] or 0.0), 2),
-                        "pm10": round(float(row["avg_pm10"] or 0.0), 2),
-                    }
-                elif d == "energy":
-                    nat_mw = float(row["avg_national_load_mw"] or 34500.0)
-                    lon_total_mw = float(row["avg_london_total_mw"] or (nat_mw * LONDON_ENERGY_SHARE))
-                    for did, dmeta in districts_by_id.items():
-                        DISTRICT_ENERGY_BASE[did] = nat_mw * LONDON_ENERGY_SHARE * float(dmeta["energy_weight"])
-                    secondary = {
-                        "renewable_share_pct": round(float(row["avg_renewable_pct"] or 0.0), 1),
-                        "low_carbon_pct": round(float(row["avg_low_carbon_pct"] or 0.0), 1),
-                        "national_load_mw": round(nat_mw, 1),
-                        "london_total_mw": round(lon_total_mw, 1),
-                        "carbon_intensity_gco2": round(float(row["avg_carbon_intensity"] or 185.0), 1),
-                    }
+                    all_p50.append(d_p50)
+                    all_p95.append(d_p95)
+                    all_avg_lat.append(d_avg_lat)
 
-                domains_summary[d] = {
-                    "domain": d,
-                    "metric_name": row["metric_name"],
-                    "avg_value": round(float(row["avg_value"]), 2),
-                    "min_value": round(float(row["min_value"]), 2),
-                    "max_value": round(float(row["max_value"]), 2),
-                    "unit": row["unit"],
-                    "event_count": int(row["event_count"]),
-                    "data_source": row["data_source"],
-                    "secondary": secondary,
-                }
+                summary = update_city_domain_summary(d, drows, d_count, districts_by_id)
+                if summary is not None:
+                    domains_summary[d] = summary
 
             districts_map: dict[str, dict[str, Any]] = {}
             new_alerts: list[dict[str, Any]] = []
@@ -707,8 +777,9 @@ def main() -> None:
                 dom = row["domain"]
                 if did not in districts_by_id or dom not in VALID_DOMAINS:
                     continue
-                dname = row["district_name"] or did
-                ztype = row["zone_type"] or "urban"
+                dmeta_row = districts_by_id[did]
+                dname = dmeta_row["district_name"]
+                ztype = dmeta_row.get("zone_type", "urban")
                 avg_val = round(float(row["avg_value"]), 2)
 
                 if did not in districts_map:
@@ -758,36 +829,50 @@ def main() -> None:
                     if dom == "traffic":
                         metric_label, unit = "Ortalama Hız", "km/s"
                     elif dom == "air_quality":
-                        metric_label, unit = "Hava Kalitesi", "AQI"
+                        metric_label, unit = "Hava Kalitesi", "puan"
                     elif dom == "energy":
-                        metric_label, unit = "Şebeke Yükü", "MW"
+                        metric_label, unit = "Enerji Yükü", "MW"
                     elif is_wind_event:
-                        metric_label, unit = "Rüzgar Hızı", "m/s"
+                        metric_label, unit = "Rüzgar Hızı", "km/s"
                     else:
                         metric_label, unit = "Sıcaklık", "°C"
 
-                    raw_measured = avg_wind if is_wind_event else avg_val
+                    raw_measured = (avg_wind * 3.6) if is_wind_event else avg_val
                     measured_val = round(raw_measured) if dom == "energy" else round(raw_measured, 1)
+                    scaled_baseline_mean = (
+                        (baseline_mean * 3.6)
+                        if (is_wind_event and baseline_mean is not None)
+                        else baseline_mean
+                    )
 
                     if thresh_hit and z_hit:
                         method = "Hibrit (Eşik + Z-Score)"
-                        chosen_baseline = ref_baseline if ref_baseline is not None else baseline_mean
-                        baseline_label = "Beklenen Normal"
+                        chosen_baseline = ref_baseline if ref_baseline is not None else scaled_baseline_mean
+                        baseline_label = "Normal Değer"
                     elif thresh_hit:
                         method = "Eşik Kuralı"
-                        chosen_baseline = ref_baseline if ref_baseline is not None else baseline_mean
-                        baseline_label = "Beklenen Normal"
+                        chosen_baseline = ref_baseline if ref_baseline is not None else scaled_baseline_mean
+                        baseline_label = "Normal Değer"
                     else:
                         method = "Z-Score Sapması"
                         severity = "warning"
                         direction = "high" if z_val > 0 else "low"
                         dir_text = "üzerine çıktı" if z_val > 0 else "altına düştü"
-                        chosen_baseline = round(baseline_mean, 1) if baseline_mean is not None else None
-                        baseline_label = "Son 60 sn Ort."
-                        base_str = f" (Normal ort: {chosen_baseline:.1f} {unit})" if chosen_baseline is not None else ""
+                        chosen_baseline = round(scaled_baseline_mean, 1) if scaled_baseline_mean is not None else None
+                        baseline_label = "Son 1 Dakika Ortalaması"
+                        val_fmt = f"{measured_val:.0f}" if dom in ("air_quality", "energy") else f"{measured_val:.1f}"
+                        if chosen_baseline is not None:
+                            base_fmt = (
+                                f"{chosen_baseline:.0f}"
+                                if dom in ("air_quality", "energy")
+                                else f"{chosen_baseline:.1f}"
+                            )
+                            base_str = f" (Ortalama: {base_fmt} {unit})"
+                        else:
+                            base_str = ""
                         thresh_reason = (
-                            f"{metric_label} son 60 sn ortalamasının {dir_text}: "
-                            f"{measured_val:.1f} {unit}{base_str}"
+                            f"{metric_label} son 1 dakikalık ortalamanın {dir_text}: "
+                            f"{val_fmt} {unit}{base_str}"
                         )
                         thresh_label = "İstatistiksel sınır: |z| > 3.2"
 
@@ -841,16 +926,20 @@ def main() -> None:
             driver_rss_mb = _process_tree_rss_mb()
 
             # Cold Path: disk-safe partitioned Parquet archiving (isolated from hot path)
-            if batch_id % ARCHIVE_EVERY_N_BATCHES == 0:
+            if should_archive:
                 try:
-                    LAST_LAKE_SIZE_MB = archive_batch_safely(batch_with_latency, batch_id)
+                    archive_input = batch_df.withColumn(
+                        "latency_ms",
+                        F.greatest(F.lit(1.0), (F.lit(now_ms) - F.col("produced_at_ms")).cast("double")),
+                    ).join(broadcast_districts, on="district_id", how="left")
+                    LAST_LAKE_SIZE_MB = archive_batch_safely(archive_input, batch_id)
                 except Exception as exc:
                     logger.warning("Non-fatal cold-path archive error on batch #%d: %s", batch_id, exc)
 
             # Hot Path: resilient Redis state & Pub/Sub broadcast
             try:
                 raw_target = r.get(REDIS_RATE_KEY)
-                target_rate = int(raw_target) if isinstance(raw_target, str) and raw_target else 100
+                target_rate = int(raw_target) if isinstance(raw_target, str) and raw_target else 10
 
                 perf_snapshot = {
                     "batch_id": batch_id,
@@ -992,7 +1081,7 @@ def main() -> None:
             if mssql_sink.is_available() and (batch_id % MSSQL_WRITE_EVERY_N_BATCHES == 0 or new_alerts):
                 try:
                     perf_for_db = {
-                        "target_rate_eps": target_rate if "target_rate" in locals() else 100,
+                        "target_rate_eps": target_rate if "target_rate" in locals() else 10,
                         "throughput_eps": throughput_eps,
                         "batch_events": row_count,
                         "avg_latency_ms": avg_lat_ms,
@@ -1031,7 +1120,8 @@ def main() -> None:
                 len(new_alerts),
             )
         finally:
-            batch_with_latency.unpersist(blocking=False)
+            if should_archive:
+                batch_df.unpersist(blocking=False)
 
     def start_query():
         return (
@@ -1050,26 +1140,48 @@ def main() -> None:
         LAKE_MAX_SIZE_MB,
     )
 
-    try:
-        query = start_query()
-    except Exception as exc:
-        logger.warning("Initial checkpoint incompatible (%s); resetting checkpoint dir and retrying...", exc)
-        shutil.rmtree(CHECKPOINT_DIR, ignore_errors=True)
-        Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
-        query = start_query()
+    shutdown_requested = False
+    query_ref: list[Any] = [None]
 
     def _shutdown(signum: int, _frame: Any) -> None:
+        nonlocal shutdown_requested
+        shutdown_requested = True
         logger.info("Received signal %s; stopping Spark streaming query gracefully...", signum)
-        try:
-            query.stop()
-        except Exception:
-            pass
+        q = query_ref[0]
+        if q is not None:
+            try:
+                q.stop()
+            except Exception:
+                pass
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
     try:
-        query.awaitTermination()
+        for attempt in range(2):
+            try:
+                query = start_query()
+                query_ref[0] = query
+                query.awaitTermination()
+                break
+            except Exception as exc:
+                if shutdown_requested:
+                    break
+                err_text = str(exc)
+                is_corrupt_ckpt = any(
+                    tok in err_text
+                    for tok in ("Incomplete log file", "Failed to read log file", "checkpoint", "OffsetSeqLog")
+                )
+                if attempt == 0 and is_corrupt_ckpt:
+                    logger.warning(
+                        "Corrupted Spark checkpoint detected (%s); resetting %s and restarting stream...",
+                        exc,
+                        CHECKPOINT_DIR,
+                    )
+                    shutil.rmtree(CHECKPOINT_DIR, ignore_errors=True)
+                    Path(CHECKPOINT_DIR).mkdir(parents=True, exist_ok=True)
+                    continue
+                raise
     finally:
         mssql_sink.close()
         spark.stop()

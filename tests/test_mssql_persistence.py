@@ -141,38 +141,46 @@ def test_mssql_sink_save_batch_and_restore_state(monkeypatch: pytest.MonkeyPatch
     assert ok is True
     assert fake_conn.committed is True
     assert len(fake_conn.cursor_obj.many_executed) == 2
-    assert any("dbo.anomaly_alerts" in sql for sql, _ in fake_conn.cursor_obj.executed)
-    assert any("dbo.platform_state" in sql for sql, _ in fake_conn.cursor_obj.executed)
+    assert any(
+        "dbo.alan_ozetleri" in sql and "kayit_zamani_utc, londra_zamani, batch_no, alan" in sql
+        for sql, _ in fake_conn.cursor_obj.many_executed
+    )
+    assert any(
+        "dbo.bolge_olcumleri" in sql and "bolge_id, bolge_adi" in sql
+        for sql, _ in fake_conn.cursor_obj.many_executed
+    )
+    assert any("dbo.anomali_uyarilari" in sql and "uyari_id" in sql for sql, _ in fake_conn.cursor_obj.executed)
+    assert any("dbo.platform_durumu" in sql and "durum_anahtari" in sql for sql, _ in fake_conn.cursor_obj.executed)
 
     restore_conn = _FakeConn(
         script=[
             (
                 "state",
                 {
-                    "cumulative_events": 1400,
-                    "cumulative_alerts": 3,
-                    "window_history_json": '{"westminster|traffic":[24.0,25.0]}',
+                    "toplam_olay_sayisi": 1400,
+                    "toplam_uyari_sayisi": 3,
+                    "pencere_gecmisi_json": '{"westminster|traffic":[24.0,25.0]}',
                 },
             ),
             (
                 "alerts",
                 [
                     {
-                        "alert_id": "abc123",
-                        "recorded_at": datetime(2026, 11, 23, 18, 0, 0),
-                        "district_id": "westminster",
-                        "district_name": "Westminster",
-                        "domain": "traffic",
-                        "metric_label": "Ortalama Hız",
-                        "unit": "km/s",
-                        "severity": "warning",
-                        "method": "Eşik Kuralı",
-                        "z_score": -2.1,
-                        "measured_value": 20.1,
-                        "baseline_value": 28.0,
-                        "threshold_label": "Hız < 24",
-                        "message": "Yol aksaması",
-                        "injected": 0,
+                        "uyari_id": "abc123",
+                        "kayit_zamani_utc": datetime(2026, 11, 23, 18, 0, 0),
+                        "bolge_id": "westminster",
+                        "bolge_adi": "Westminster",
+                        "alan": "traffic",
+                        "metrik_etiketi": "Ortalama Hız",
+                        "birim": "km/s",
+                        "seviye": "warning",
+                        "tespit_yontemi": "Eşik Kuralı",
+                        "z_skoru": -2.1,
+                        "olculen_deger": 20.1,
+                        "referans_deger": 28.0,
+                        "esik_etiketi": "Hız < 24",
+                        "aciklama": "Yol aksaması",
+                        "test_enjekte": 0,
                     }
                 ],
             ),
@@ -180,9 +188,9 @@ def test_mssql_sink_save_batch_and_restore_state(monkeypatch: pytest.MonkeyPatch
                 "timeseries",
                 [
                     {
-                        "recorded_at": datetime(2026, 11, 23, 18, 0, 0),
-                        "throughput_eps": 98.5,
-                        "p50_latency_ms": 110.0,
+                        "kayit_zamani_utc": datetime(2026, 11, 23, 18, 0, 0),
+                        "islenen_hiz_olay_sn": 98.5,
+                        "p50_gecikme_ms": 110.0,
                         "traffic": 24.5,
                         "weather": 10.2,
                         "air_quality": 22.0,
@@ -198,8 +206,133 @@ def test_mssql_sink_save_batch_and_restore_state(monkeypatch: pytest.MonkeyPatch
     assert restored["cumulative_events"] == 1400
     assert restored["cumulative_alerts"] == 3
     assert len(restored["recent_alerts"]) == 1
+    assert restored["recent_alerts"][0]["alert_id"] == "abc123"
+    assert restored["recent_alerts"][0]["value"] == 20.1
     assert len(restored["timeseries"]) == 1
     assert restored["timeseries"][0]["traffic"] == 24.5
+    assert restored["timeseries"][0]["throughput_eps"] == 98.5
+    assert restored["timeseries"][0]["latency_ms"] == 110.0
+
+
+def test_mssql_schema_uses_turkish_columns_and_idempotent_migrations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every table and index DDL must use Turkish table, index, and column names
+    table_and_index_sql = "\n".join(mssql_sink._TABLE_DDL_STATEMENTS + mssql_sink._INDEX_DDL_STATEMENTS)
+    for old_table, new_table in mssql_sink._TABLE_RENAMES:
+        assert f"dbo.{old_table}" not in table_and_index_sql
+        assert f"dbo.{new_table}" in table_and_index_sql
+    for _, old_idx, new_idx in mssql_sink._INDEX_RENAMES:
+        assert old_idx not in table_and_index_sql
+        assert new_idx in table_and_index_sql
+    for _, old_col, new_col in mssql_sink._COLUMN_RENAMES:
+        assert f"\n        {old_col} " not in table_and_index_sql
+        assert new_col in table_and_index_sql
+
+    # Every renamed table has an idempotent OBJECT_ID + sp_rename statement before CREATE TABLE
+    table_migrations = mssql_sink._build_table_migration_statements()
+    assert len(table_migrations) == 5
+    for stmt, (old_table, new_table) in zip(table_migrations, mssql_sink._TABLE_RENAMES):
+        assert f"OBJECT_ID(N'dbo.{old_table}', N'U') IS NOT NULL" in stmt
+        assert f"OBJECT_ID(N'dbo.{new_table}', N'U') IS NULL" in stmt
+        assert f"EXEC sp_rename N'dbo.{old_table}', N'{new_table}'" in stmt
+
+    # Every renamed column has an idempotent COL_LENGTH + sp_rename migration statement
+    migrations = mssql_sink._build_column_migration_statements()
+    assert len(migrations) == len(mssql_sink._COLUMN_RENAMES)
+    assert len(migrations) == 61
+    for stmt, (table, old_col, new_col) in zip(migrations, mssql_sink._COLUMN_RENAMES):
+        assert f"COL_LENGTH(N'dbo.{table}', N'{old_col}') IS NOT NULL" in stmt
+        assert f"COL_LENGTH(N'dbo.{table}', N'{new_col}') IS NULL" in stmt
+        assert f"EXEC sp_rename N'dbo.{table}.{old_col}', N'{new_col}', N'COLUMN'" in stmt
+
+    # Every renamed index has an idempotent sp_rename statement
+    idx_migrations = mssql_sink._build_index_migration_statements()
+    assert len(idx_migrations) == 4
+    for stmt, (table, old_idx, new_idx) in zip(idx_migrations, mssql_sink._INDEX_RENAMES):
+        assert f"EXEC sp_rename N'dbo.{table}.{old_idx}', N'{new_idx}', N'INDEX'" in stmt
+
+    # Views should expose only Turkish names and Turkish output columns
+    views_sql = "\n".join(mssql_sink._VIEW_DDL_STATEMENTS)
+    for new_view in ("vw_saatlik_sehir_ozeti", "vw_son_uyarilar", "vw_son_bolge_durumu"):
+        assert f"CREATE OR ALTER VIEW dbo.{new_view}" in views_sql
+    for legacy_view in mssql_sink._LEGACY_VIEWS:
+        assert f"DROP VIEW IF EXISTS dbo.{legacy_view}" in views_sql
+    assert "z_skoru" in views_sql and "z_score" not in views_sql
+    assert "bolge_id" in views_sql and "district_id" not in views_sql
+    assert "bolge_adi" in views_sql and "district_name" not in views_sql
+    assert "bolge_tipi" in views_sql and "zone_type" not in views_sql
+
+    # Verify reader queries Turkish columns while keeping backwards-compatible English API aliases
+    snap_conn = _FakeConn(
+        script=[
+            (
+                "snaps",
+                [
+                    {
+                        "id": 1,
+                        "recorded_at": datetime(2026, 11, 23, 18, 0, 0),
+                        "london_time": datetime(2026, 11, 23, 18, 0, 0),
+                        "batch_id": 7,
+                        "domain": "traffic",
+                        "metric_name": "avg_speed_kmh",
+                        "avg_value": 24.5,
+                        "min_value": 18.0,
+                        "max_value": 31.0,
+                        "unit": "km/h",
+                        "event_count": 50,
+                        "data_source": "TfL",
+                    }
+                ],
+            )
+        ]
+    )
+    monkeypatch.setenv("MSSQL_ENABLED", "true")
+    monkeypatch.setattr(mssql_reader, "pymssql", object())
+    monkeypatch.setattr(mssql_reader, "_connect", lambda timeout=5: snap_conn)
+
+    snaps = mssql_reader.query_saved_snapshots(domain="traffic", district_id="all", limit=5)
+    assert len(snaps) == 1 and snaps[0]["avg_value"] == 24.5
+    snap_sql = snap_conn.cursor_obj.executed[0][0]
+    assert "alan = %s" in snap_sql
+    assert "ortalama_deger AS avg_value" in snap_sql
+    assert "ORDER BY londra_zamani DESC, id DESC" in snap_sql
+
+    alert_conn = _FakeConn(
+        script=[
+            (
+                "alerts",
+                [
+                    {
+                        "id": 1,
+                        "alert_id": "abc123",
+                        "recorded_at": datetime(2026, 11, 23, 18, 0, 0),
+                        "london_time": datetime(2026, 11, 23, 18, 0, 0),
+                        "district_id": "westminster",
+                        "district_name": "Westminster",
+                        "domain": "traffic",
+                        "metric_label": "Ortalama Hız",
+                        "unit": "km/s",
+                        "severity": "warning",
+                        "method": "Eşik Kuralı",
+                        "z_score": -2.1,
+                        "measured_value": 20.1,
+                        "baseline_value": 28.0,
+                        "threshold_label": "Hız < 24",
+                        "message": "Yol aksaması",
+                        "injected": 0,
+                    }
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(mssql_reader, "_connect", lambda timeout=5: alert_conn)
+    alerts = mssql_reader.query_saved_alerts(domain="traffic", district_id="westminster", severity="warning", limit=5)
+    assert len(alerts) == 1 and alerts[0]["alert_id"] == "abc123" and alerts[0]["injected"] is False
+    alert_sql = alert_conn.cursor_obj.executed[0][0]
+    assert "alan = %s" in alert_sql and "bolge_id = %s" in alert_sql and "seviye = %s" in alert_sql
+    assert "olculen_deger AS measured_value" in alert_sql
+    assert "ORDER BY kayit_zamani_utc DESC, id DESC" in alert_sql
 
 
 def test_mssql_reader_hourly_and_storage_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:

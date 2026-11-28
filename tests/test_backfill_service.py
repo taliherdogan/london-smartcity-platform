@@ -128,3 +128,87 @@ def test_backend_backfill_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     assert r_post.json()["api_hours_filled"] == 2
     assert r_post.json()["total_rows_inserted"] == 198
     assert r_bad.status_code == 422
+
+
+def test_backfill_sql_uses_turkish_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    executed: list[tuple[str, Any]] = []
+    many_executed: list[tuple[str, list[Any]]] = []
+
+    class _Cur:
+        def __init__(self, rows: list[Any] | None = None, one: Any = None) -> None:
+            self._rows = rows or []
+            self._one = one
+
+        def __enter__(self) -> _Cur:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            executed.append((sql, params))
+
+        def executemany(self, sql: str, seq: list[Any]) -> None:
+            many_executed.append((sql, list(seq)))
+
+        def fetchone(self) -> Any:
+            return self._one
+
+        def fetchall(self) -> list[Any]:
+            return list(self._rows)
+
+    class _Conn:
+        def __init__(self, rows: list[Any] | None = None, one: Any = None) -> None:
+            self._cur = _Cur(rows=rows, one=one)
+
+        def cursor(self, as_dict: bool = False) -> _Cur:
+            return self._cur
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setenv("MSSQL_ENABLED", "true")
+    monkeypatch.setattr(backfill_service, "pymssql", object())
+
+    monkeypatch.setattr(backfill_service, "_connect_rw", lambda timeout=5: _Conn(one=(1,)))
+    assert backfill_service._check_schema_ready() is True
+    assert "COL_LENGTH(N'dbo.alan_ozetleri', N'londra_zamani')" in executed[-1][0]
+    assert "COL_LENGTH(N'dbo.bolge_olcumleri', N'bolge_id')" in executed[-1][0]
+
+    monkeypatch.setattr(
+        backfill_service,
+        "_connect_rw",
+        lambda timeout=10: _Conn(
+            rows=[
+                {
+                    "hour_bucket": datetime(2026, 11, 24, 3, 0, 0),
+                    "domain": "weather",
+                    "has_live": 1,
+                    "has_api": 0,
+                }
+            ]
+        ),
+    )
+    cov = backfill_service._inspect_existing_mssql_coverage(
+        datetime(2026, 11, 24, 0, 0, 0), datetime(2026, 11, 24, 4, 0, 0)
+    )
+    assert "weather" in cov["live_hours"]["2026-11-24T03:00"]
+    assert "FROM dbo.alan_ozetleri" in executed[-1][0]
+    assert "londra_zamani" in executed[-1][0] and "batch_no" in executed[-1][0] and "alan AS domain" in executed[-1][0]
+
+    monkeypatch.setattr(backfill_service, "_connect_rw", lambda timeout=30: _Conn())
+    backfill_service._write_backfill_rows(
+        domain_rows=[(datetime(2026, 11, 24, 1, 0), datetime(2026, 11, 24, 1, 0), -1, "weather", "temperature_c", 7.0, 6.5, 7.5, "°C", 1, "Open-Meteo", "{}")],
+        district_rows=[(datetime(2026, 11, 24, 1, 0), datetime(2026, 11, 24, 1, 0), -1, "westminster", "Westminster", "central", "weather", 7.0, 7.0, 7.0, 1, "normal", 0)],
+    )
+    assert len(many_executed) == 2
+    assert "INSERT INTO dbo.alan_ozetleri" in many_executed[0][0]
+    assert "kayit_zamani_utc, londra_zamani, batch_no, alan" in many_executed[0][0]
+    assert "INSERT INTO dbo.bolge_olcumleri" in many_executed[1][0]
+    assert "bolge_id, bolge_adi" in many_executed[1][0] and "tfl_yol_aksamasi" in many_executed[1][0]
