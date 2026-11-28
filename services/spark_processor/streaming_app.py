@@ -997,6 +997,7 @@ def main() -> None:
                     logger.warning("Non-fatal cold-path archive error on batch #%d: %s", batch_id, exc)
 
             # Hot Path: resilient Redis state & Pub/Sub broadcast
+            target_rate = 10
             try:
                 raw_target = r.get(REDIS_RATE_KEY)
                 target_rate = int(raw_target) if isinstance(raw_target, str) and raw_target else 10
@@ -1152,7 +1153,7 @@ def main() -> None:
             if mssql_sink.is_available() and (batch_id % MSSQL_WRITE_EVERY_N_BATCHES == 0 or new_alerts):
                 try:
                     perf_for_db = {
-                        "target_rate_eps": target_rate if "target_rate" in locals() else 10,
+                        "target_rate_eps": target_rate,
                         "throughput_eps": throughput_eps,
                         "batch_events": row_count,
                         "avg_latency_ms": avg_lat_ms,

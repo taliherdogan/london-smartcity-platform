@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 try:
-    import pymssql
+    import pymssql  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - optional in slim unit-test environments
     pymssql = None  # type: ignore[assignment]
 
@@ -322,7 +322,7 @@ class MSSQLSink:
             (
                 rec_utc,
                 lon_naive,
-                int(batch_id),
+                batch_id,
                 dom,
                 info.get("metric_name"),
                 float(info["avg_value"]),
@@ -347,7 +347,7 @@ class MSSQLSink:
                     (
                         rec_utc,
                         lon_naive,
-                        int(batch_id),
+                        batch_id,
                         did,
                         dname,
                         ztype,
@@ -385,7 +385,7 @@ class MSSQLSink:
 
         telemetry_row = (
             rec_utc,
-            int(batch_id),
+            batch_id,
             int(perf_snapshot.get("target_rate_eps") or 0),
             float(perf_snapshot.get("throughput_eps") or 0.0),
             int(perf_snapshot.get("batch_events") or 0),
@@ -476,11 +476,11 @@ class MSSQLSink:
                         (
                             cum_events,
                             cum_alerts,
-                            int(batch_id),
+                            batch_id,
                             win_json,
                             cum_events,
                             cum_alerts,
-                            int(batch_id),
+                            batch_id,
                             win_json,
                         ),
                     )
