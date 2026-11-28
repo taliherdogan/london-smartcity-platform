@@ -449,7 +449,8 @@ async def _build_api_backfill_rows(
                 for d in districts
             ] or [round(london_total_mw / 32.0, 2)]
 
-            en_source = "Elexon BMRS + NESO Historical Backfill" if neso_ok else "Elexon BMRS Historical Backfill"
+            has_neso = neso_pt is not None
+            en_source = "Elexon BMRS + NESO Historical Backfill" if has_neso else "Elexon BMRS Historical Backfill"
             domain_rows.append(
                 (
                     rec_utc,

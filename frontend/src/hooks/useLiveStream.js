@@ -8,7 +8,6 @@ export function useLiveStream(activeTab = 'live') {
   const [targetRate, setTargetRate] = useState(10)
   const [activeAnomaly, setActiveAnomaly] = useState(null)
   const [benchmarks, setBenchmarks] = useState(null)
-  const [systemHealth, setSystemHealth] = useState(null)
   const [todaySummary, setTodaySummary] = useState(null)
   const [connected, setConnected] = useState(false)
   const [browserOffline, setBrowserOffline] = useState(
@@ -19,6 +18,9 @@ export function useLiveStream(activeTab = 'live') {
 
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
+  const anomalyRefreshTimerRef = useRef(null)
+  const targetRateRef = useRef(10)
+  targetRateRef.current = targetRate
   const reconnectDelayRef = useRef(2000)
   const pendingRawFrameRef = useRef(null)
   const rafIdRef = useRef(null)
@@ -55,18 +57,6 @@ export function useLiveStream(activeTab = 'live') {
         setServerInternetOnline(s.internet_online)
       }
       setActiveAnomaly(s.active_anomaly || null)
-    } catch {
-      // retry silently on next poll
-    }
-  }, [])
-
-  const fetchSystemHealth = useCallback(async () => {
-    if (document.hidden) return
-    try {
-      const sysRes = await fetch('/api/system')
-      if (!sysRes.ok) return
-      const data = await sysRes.json()
-      startTransition(() => setSystemHealth(data))
     } catch {
       // retry silently on next poll
     }
@@ -137,10 +127,8 @@ export function useLiveStream(activeTab = 'live') {
 
     fetchSources()
     fetchBenchmarks()
-    fetchSystemHealth()
     fetchTodaySummary()
     const metaTimer = setInterval(fetchSources, 5000)
-    const sysTimer = setInterval(fetchSystemHealth, 10000)
     const todayTimer = setInterval(fetchTodaySummary, 300000)
 
     const commitPendingFrame = () => {
@@ -221,7 +209,7 @@ export function useLiveStream(activeTab = 'live') {
       ws.onmessage = (evt) => {
         if (isOfflineRef.current) return
         // Skip heartbeats cheaply without full JSON parse
-        if (typeof evt.data === 'string' && evt.data.includes('"heartbeat"')) return
+        if (typeof evt.data === 'string' && evt.data.startsWith('{"type":"heartbeat"')) return
         // Store raw string; only parse the latest frame when actually committing
         pendingRawFrameRef.current = evt.data
         scheduleFlush()
@@ -244,24 +232,30 @@ export function useLiveStream(activeTab = 'live') {
       window.removeEventListener('online', handleOnline)
       window.removeEventListener('offline', handleOffline)
       clearInterval(metaTimer)
-      clearInterval(sysTimer)
       clearInterval(todayTimer)
       clearTimeout(reconnectTimer.current)
+      clearTimeout(anomalyRefreshTimerRef.current)
       if (throttleTimerRef.current !== null) clearTimeout(throttleTimerRef.current)
       if (rafIdRef.current !== null) window.cancelAnimationFrame(rafIdRef.current)
       if (wsRef.current) wsRef.current.close()
     }
-  }, [fetchSources, fetchBenchmarks, fetchSystemHealth, fetchTodaySummary])
+  }, [fetchSources, fetchBenchmarks, fetchTodaySummary])
 
   const changeRate = useCallback(async (rate) => {
+    const prevRate = targetRateRef.current
     setControlBusy(true)
     setTargetRate(rate)
     try {
-      await fetch('/api/control/rate', {
+      const res = await fetch('/api/control/rate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rate }),
       })
+      if (!res.ok) {
+        setTargetRate(prevRate)
+      }
+    } catch {
+      setTargetRate(prevRate)
     } finally {
       setControlBusy(false)
     }
@@ -279,8 +273,11 @@ export function useLiveStream(activeTab = 'live') {
         if (res.ok) {
           const data = await res.json()
           setActiveAnomaly(data.anomaly)
-          setTimeout(() => fetchSources(), 16000)
+          clearTimeout(anomalyRefreshTimerRef.current)
+          anomalyRefreshTimerRef.current = setTimeout(() => fetchSources(), 16000)
         }
+      } catch {
+        // non-fatal control error
       } finally {
         setControlBusy(false)
       }
@@ -294,7 +291,6 @@ export function useLiveStream(activeTab = 'live') {
     targetRate,
     activeAnomaly,
     benchmarks,
-    systemHealth,
     todaySummary,
     connected,
     isOffline,

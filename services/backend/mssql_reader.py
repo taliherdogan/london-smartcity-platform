@@ -85,7 +85,14 @@ def read_mssql_hourly(
                     SELECT
                         DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS hour_bucket,
                         alan AS domain,
-                        AVG(ortalama_deger) AS mean_val,
+                        COALESCE(
+                            SUM(CASE WHEN batch_no >= 0 THEN ortalama_deger * CAST(olay_sayisi AS FLOAT) END)
+                                / NULLIF(SUM(CASE WHEN batch_no >= 0 THEN CAST(olay_sayisi AS FLOAT) END), 0),
+                            AVG(CASE WHEN batch_no >= 0 THEN ortalama_deger END),
+                            SUM(ortalama_deger * CAST(olay_sayisi AS FLOAT))
+                                / NULLIF(SUM(CAST(olay_sayisi AS FLOAT)), 0),
+                            AVG(ortalama_deger)
+                        ) AS mean_val,
                         SUM(CAST(olay_sayisi AS BIGINT)) AS rec_count
                     FROM dbo.alan_ozetleri
                     WHERE londra_zamani >= %s AND londra_zamani < %s
@@ -99,7 +106,14 @@ def read_mssql_hourly(
                     SELECT
                         DATEADD(HOUR, DATEDIFF(HOUR, 0, londra_zamani), 0) AS hour_bucket,
                         alan AS domain,
-                        AVG(ortalama_deger) AS mean_val,
+                        COALESCE(
+                            SUM(CASE WHEN batch_no >= 0 THEN ortalama_deger * CAST(olay_sayisi AS FLOAT) END)
+                                / NULLIF(SUM(CASE WHEN batch_no >= 0 THEN CAST(olay_sayisi AS FLOAT) END), 0),
+                            AVG(CASE WHEN batch_no >= 0 THEN ortalama_deger END),
+                            SUM(ortalama_deger * CAST(olay_sayisi AS FLOAT))
+                                / NULLIF(SUM(CAST(olay_sayisi AS FLOAT)), 0),
+                            AVG(ortalama_deger)
+                        ) AS mean_val,
                         SUM(CAST(olay_sayisi AS BIGINT)) AS rec_count
                     FROM dbo.bolge_olcumleri
                     WHERE londra_zamani >= %s AND londra_zamani < %s AND bolge_id = %s

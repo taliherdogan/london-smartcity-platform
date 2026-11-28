@@ -111,6 +111,59 @@ def test_fetch_air_quality_multi_district() -> None:
     assert result["district_values"]["greenwich"]["value"] == 36.0
 
 
+def test_fetch_weather_and_aqi_handle_nulls_and_zeroes() -> None:
+    weather_payload = [
+        {
+            "current": {
+                "temperature_2m": 0.0,
+                "relative_humidity_2m": None,
+                "wind_speed_10m": 0.0,
+                "precipitation": 0.0,
+                "surface_pressure": None,
+            }
+        }
+    ]
+    aqi_payload = [
+        {
+            "current": {
+                "european_aqi": None,
+                "pm2_5": 0.0,
+                "pm10": 0.0,
+                "nitrogen_dioxide": None,
+                "ozone": 35.0,
+            }
+        }
+    ]
+    client = _FakeClient(
+        {
+            "https://api.open-meteo.com/v1/forecast": _FakeResponse(weather_payload),
+            "https://air-quality-api.open-meteo.com/v1/air-quality": _FakeResponse(aqi_payload),
+        }
+    )
+    w = api_poller.fetch_weather(client, [SAMPLE_DISTRICTS[0]])  # type: ignore[arg-type]
+    assert w["value"] == 0.0
+    assert w["secondary"]["humidity_pct"] == 76.0
+    assert w["secondary"]["wind_speed_ms"] == 0.0
+
+    aq = api_poller.fetch_air_quality(client, [SAMPLE_DISTRICTS[0]])  # type: ignore[arg-type]
+    assert aq["value"] == 28.0
+    assert aq["secondary"]["pm2_5"] == 0.0
+    assert aq["secondary"]["pm10"] == 0.0
+
+
+def test_fetch_energy_survives_neso_failure_when_elexon_succeeds() -> None:
+    client = _FakeClient(
+        {
+            api_poller.ELEXON_DEMAND_URL: _FakeResponse([{"demand": 36000.0}]),
+            api_poller.NESO_LONDON_CARBON_URL: _FakeResponse({"error": "down"}, status_code=503),
+        }
+    )
+    res = api_poller.fetch_energy(client)  # type: ignore[arg-type]
+    assert res["status"] == "live"
+    assert res["value"] == 36000.0
+    assert res["secondary"]["london_total_mw"] == pytest.approx(36000.0 * api_poller.LONDON_ENERGY_SHARE, rel=1e-3)
+
+
 def test_fetch_traffic_parses_tfl_corridors() -> None:
     fake_corridors = [
         {"displayName": "A40", "statusSeverity": "Good", "statusSeverityDescription": "No Exceptional Delays"},

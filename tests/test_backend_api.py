@@ -105,6 +105,13 @@ def test_control_anomaly_validation(fake_redis: _FakeAsyncRedis) -> None:
     bad = _request("POST", "/api/control/anomaly", json={"domain": "invalid_domain", "duration_sec": 15})
     assert bad.status_code == 422
 
+    bad_dist = _request(
+        "POST",
+        "/api/control/anomaly",
+        json={"domain": "traffic", "district_id": "nonexistent_borough", "duration_sec": 10},
+    )
+    assert bad_dist.status_code == 400
+
     ok = _request(
         "POST",
         "/api/control/anomaly",
@@ -112,6 +119,11 @@ def test_control_anomaly_validation(fake_redis: _FakeAsyncRedis) -> None:
     )
     assert ok.status_code == 200
     assert backend_main.REDIS_ANOMALY_KEY in fake_redis.store
+
+
+def test_storage_snapshots_rejects_inverted_date_range(fake_redis: _FakeAsyncRedis) -> None:
+    resp = _request("GET", "/api/storage/snapshots?start_date=2026-11-28&end_date=2026-11-20")
+    assert resp.status_code == 400
 
 
 def test_districts_endpoint(fake_redis: _FakeAsyncRedis) -> None:

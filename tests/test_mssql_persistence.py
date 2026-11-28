@@ -208,6 +208,8 @@ def test_mssql_sink_save_batch_and_restore_state(monkeypatch: pytest.MonkeyPatch
     assert len(restored["recent_alerts"]) == 1
     assert restored["recent_alerts"][0]["alert_id"] == "abc123"
     assert restored["recent_alerts"][0]["value"] == 20.1
+    assert restored["recent_alerts"][0]["direction"] == "low"
+    assert restored["recent_alerts"][0]["baseline_label"] == "Normal Değer"
     assert len(restored["timeseries"]) == 1
     assert restored["timeseries"][0]["traffic"] == 24.5
     assert restored["timeseries"][0]["throughput_eps"] == 98.5

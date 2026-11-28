@@ -417,6 +417,8 @@ def main() -> None:
     ticks_per_sec = 10
     tick_duration = 1.0 / ticks_per_sec
     current_rate = max(10, min(MAX_EVENT_RATE, DEFAULT_RATE))
+    rate_carry = 0.0
+    next_seq = 0
     last_control_check = 0.0
     total_sent = 0
     window_sent = 0
@@ -455,7 +457,11 @@ def main() -> None:
                 except Exception as exc:
                     logger.debug("Control poll warning: %s", exc)
 
-            events_this_tick = max(1, int(round(current_rate / ticks_per_sec)))
+            rate_carry += current_rate / ticks_per_sec
+            events_this_tick = int(rate_carry)
+            rate_carry -= events_this_tick
+            if events_this_tick <= 0:
+                events_this_tick = 1
 
             with shared_lock:
                 baselines_snapshot = dict(live_baselines)
@@ -507,7 +513,8 @@ def main() -> None:
             for i in range(events_this_tick):
                 if stop_event.is_set():
                     break
-                seq = total_sent + i
+                seq = next_seq
+                next_seq += 1
                 domain = domains[seq % num_domains]
                 district = districts[(seq // num_domains) % num_districts]
                 evt = build_event(

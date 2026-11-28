@@ -174,7 +174,7 @@ export default function App() {
         {activeTab === 'history' && <HistoryView />}
 
         {activeTab === 'districts' && (
-          <DistrictView districts={liveState?.districts} sources={sources} />
+          <DistrictView districts={liveState?.districts} />
         )}
 
         {activeTab === 'benchmarks' && (

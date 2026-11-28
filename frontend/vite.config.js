@@ -6,10 +6,16 @@ export default defineConfig({
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom'],
-          'recharts-vendor': ['recharts'],
-          'icons-vendor': ['lucide-react'],
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('lucide-react')) return 'icons-vendor'
+          if (id.includes('recharts') || id.includes('d3-') || id.includes('victory-vendor')) {
+            return 'recharts-vendor'
+          }
+          if (id.includes('react-dom') || id.includes('/react/') || id.includes('\\react\\') || id.includes('scheduler')) {
+            return 'react-vendor'
+          }
+          return undefined
         },
       },
     },

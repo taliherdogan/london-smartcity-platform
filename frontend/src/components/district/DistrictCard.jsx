@@ -163,7 +163,10 @@ function DistrictCard({ district: d, stats }) {
               {energyLvl.label}
             </span>
           </div>
-          <div className="mt-2 flex items-baseline gap-1 font-mono text-lg font-extrabold tracking-tight text-slate-900 tabular-nums">
+          <div
+            className="mt-2 flex items-baseline gap-1 font-mono text-lg font-extrabold tracking-tight text-slate-900 tabular-nums"
+            title={energy != null ? `${Math.round(energy).toLocaleString('tr-TR')} MW` : undefined}
+          >
             <span>{energy != null ? `%${energySharePct}` : '—'}</span>
             <span className="text-[11px] font-semibold text-slate-400">şehir payı</span>
           </div>

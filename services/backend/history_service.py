@@ -60,7 +60,7 @@ TR_MONTHS_SHORT = {
     12: "Ara",
 }
 
-_DISTRICTS_CACHE: list[dict[str, Any]] | None = None
+_DISTRICTS_CACHE: dict[str, list[dict[str, Any]]] = {}
 
 # Thread-safe in-memory cache for Parquet domain partition summaries.
 # Key: str(dom_dir) -> (mtime_ns, {district_id: (sum, count)}, total_sum, total_count)
@@ -139,9 +139,10 @@ def london_diurnal_traffic_factor(hour: int, weekday: int) -> float:
 
 
 def load_districts_metadata(metadata_path: str | Path) -> list[dict[str, Any]]:
-    global _DISTRICTS_CACHE
-    if _DISTRICTS_CACHE is not None:
-        return _DISTRICTS_CACHE
+    cache_key = str(metadata_path)
+    cached = _DISTRICTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     candidates: list[Path] = [Path(metadata_path)]
     resolved = Path(__file__).resolve()
@@ -152,7 +153,7 @@ def load_districts_metadata(metadata_path: str | Path) -> list[dict[str, Any]]:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, list) and data:
-                    _DISTRICTS_CACHE = data
+                    _DISTRICTS_CACHE[cache_key] = data
                     return data
             except Exception as exc:
                 logger.warning("Failed reading districts metadata from %s: %s", path, exc)

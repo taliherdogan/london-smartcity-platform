@@ -83,7 +83,7 @@ REDIS_HISTORY_CACHE_PREFIX = "smartcity:history:v1:"
 
 class ConnectionManager:
     def __init__(self, max_clients: int = WS_MAX_CLIENTS, send_timeout: float = WS_SEND_TIMEOUT_SEC) -> None:
-        self.active: set[WebSocket] = set()
+        self.active: dict[WebSocket, asyncio.Lock] = {}
         self.max_clients = max_clients
         self.send_timeout = send_timeout
         self.dropped_slow_clients = 0
@@ -96,11 +96,18 @@ class ConnectionManager:
             await ws.close(code=1013, reason="Server busy: max WebSocket clients reached")
             return False
         await ws.accept()
-        self.active.add(ws)
+        self.active[ws] = asyncio.Lock()
         return True
 
     def disconnect(self, ws: WebSocket) -> None:
-        self.active.discard(ws)
+        self.active.pop(ws, None)
+
+    async def send_personal(self, ws: WebSocket, message: str) -> None:
+        lock = self.active.get(ws)
+        if lock is None:
+            return
+        async with lock:
+            await asyncio.wait_for(ws.send_text(message), timeout=self.send_timeout)
 
     def enqueue_frame(self, message: str) -> None:
         """Keep only the freshest snapshot if broadcasters are mid-flush (O(1) RAM)."""
@@ -109,21 +116,25 @@ class ConnectionManager:
         self._latest_frame = message
         self._frame_event.set()
 
-    async def _send_one(self, ws: WebSocket, message: str) -> WebSocket | None:
+    async def _send_one(self, ws: WebSocket, lock: asyncio.Lock, message: str) -> WebSocket | None:
         try:
-            await asyncio.wait_for(ws.send_text(message), timeout=self.send_timeout)
+            async with lock:
+                await asyncio.wait_for(ws.send_text(message), timeout=self.send_timeout)
             return None
         except Exception:
             return ws
 
     async def broadcast(self, message: str) -> None:
-        targets = list(self.active)
+        targets = list(self.active.items())
         if not targets:
             return
-        results = await asyncio.gather(*(self._send_one(ws, message) for ws in targets), return_exceptions=True)
+        results = await asyncio.gather(
+            *(self._send_one(ws, lock, message) for ws, lock in targets),
+            return_exceptions=True,
+        )
         for item in results:
             if isinstance(item, WebSocket):
-                self.active.discard(item)
+                self.active.pop(item, None)
                 self.dropped_slow_clients += 1
                 try:
                     await item.close(code=1001)
@@ -250,9 +261,11 @@ async def lifespan(_app: FastAPI):
     pubsub_task = asyncio.create_task(redis_listener())
     backfill_task = asyncio.create_task(auto_backfill_loop())
     yield
-    for task in (pubsub_task, broadcaster_task, backfill_task):
-        if task:
-            task.cancel()
+    bg_tasks = [t for t in (pubsub_task, broadcaster_task, backfill_task) if t is not None]
+    for task in bg_tasks:
+        task.cancel()
+    if bg_tasks:
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
     if history_http_client:
         await history_http_client.aclose()
     if redis_client:
@@ -427,9 +440,16 @@ async def set_rate(req: RateRequest) -> dict[str, Any]:
     return {"ok": True, "target_rate": req.rate}
 
 
+def _valid_district_ids() -> set[str]:
+    return {str(d["district_id"]) for d in load_districts_metadata(METADATA_PATH)}
+
+
 @app.post("/api/control/anomaly")
 async def trigger_anomaly(req: AnomalyRequest) -> dict[str, Any]:
     r = _require_redis()
+    valid_ids = _valid_district_ids()
+    if req.district_id != "all" and valid_ids and req.district_id not in valid_ids:
+        raise HTTPException(status_code=400, detail=f"Unknown district_id: {req.district_id}")
     payload = {
         "domain": req.domain,
         "district_id": req.district_id,
@@ -477,16 +497,25 @@ async def get_benchmarks() -> dict[str, Any]:
         )
         for rate, entries in zip(sorted_rates, all_entries):
             if entries:
-                parsed = [json.loads(x) for x in entries]
+                parsed: list[dict[str, Any]] = []
+                for x in entries:
+                    try:
+                        obj = json.loads(x)
+                        if isinstance(obj, dict) and "throughput_eps" in obj:
+                            parsed.append(obj)
+                    except Exception:
+                        continue
                 count = len(parsed)
+                if count == 0:
+                    continue
                 live_rates.append(
                     {
                         "target_rate_eps": rate,
                         "samples": count,
-                        "avg_throughput_eps": round(sum(p["throughput_eps"] for p in parsed) / count, 1),
-                        "avg_p50_latency_ms": round(sum(p["p50_latency_ms"] for p in parsed) / count, 1),
-                        "avg_p95_latency_ms": round(sum(p["p95_latency_ms"] for p in parsed) / count, 1),
-                        "avg_spark_batch_ms": round(sum(p["spark_batch_ms"] for p in parsed) / count, 1),
+                        "avg_throughput_eps": round(sum(float(p["throughput_eps"]) for p in parsed) / count, 1),
+                        "avg_p50_latency_ms": round(sum(float(p.get("p50_latency_ms", 0.0)) for p in parsed) / count, 1),
+                        "avg_p95_latency_ms": round(sum(float(p.get("p95_latency_ms", 0.0)) for p in parsed) / count, 1),
+                        "avg_spark_batch_ms": round(sum(float(p.get("spark_batch_ms", 0.0)) for p in parsed) / count, 1),
                     }
                 )
     except Exception as exc:
@@ -543,6 +572,10 @@ async def get_history(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    valid_ids = _valid_district_ids()
+    if district_id != "all" and valid_ids and district_id not in valid_ids:
+        raise HTTPException(status_code=400, detail=f"Unknown district_id: {district_id}")
 
     days_count = (e_date - s_date).days + 1
     eff_granularity = ("daily" if days_count > 7 else "hourly") if granularity == "auto" else granularity
@@ -613,6 +646,8 @@ async def storage_snapshots(
         e_date = date_type.fromisoformat(end_date) if end_date else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
+    if s_date and e_date and s_date > e_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
 
     rows = await asyncio.to_thread(
         query_saved_snapshots,
@@ -687,17 +722,14 @@ async def websocket_live(ws: WebSocket) -> None:
             try:
                 latest = await redis_client.get(REDIS_LATEST_KEY)
                 if latest:
-                    await asyncio.wait_for(ws.send_text(latest), timeout=WS_SEND_TIMEOUT_SEC)
+                    await manager.send_personal(ws, latest)
             except Exception:
                 pass
         while True:
             try:
                 await asyncio.wait_for(ws.receive_text(), timeout=30.0)
             except asyncio.TimeoutError:
-                await asyncio.wait_for(
-                    ws.send_text(json.dumps({"type": "heartbeat", "ts": time.time()})),
-                    timeout=WS_SEND_TIMEOUT_SEC,
-                )
+                await manager.send_personal(ws, json.dumps({"type": "heartbeat", "ts": time.time()}))
     except WebSocketDisconnect:
         manager.disconnect(ws)
     except Exception:

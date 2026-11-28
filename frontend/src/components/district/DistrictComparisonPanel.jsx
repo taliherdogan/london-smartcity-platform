@@ -43,6 +43,7 @@ function TrafficChartTooltip({ active, payload, avgTraffic }) {
   if (!active || !payload?.length) return null
   const item = payload[0].payload
   const speed = item.traffic
+  if (speed == null) return null
   const style = getTrafficBarStyle(speed)
   const diff = speed - avgTraffic
   return (
@@ -104,6 +105,7 @@ function AqiChartTooltip({ active, payload, avgAqi }) {
   if (!active || !payload?.length) return null
   const item = payload[0].payload
   const aqi = item.aqi
+  if (aqi == null) return null
   const style = getAqiBarStyle(aqi)
   const diff = aqi - avgAqi
   return (
@@ -133,6 +135,7 @@ function TempChartTooltip({ active, payload, avgTemp }) {
   if (!active || !payload?.length) return null
   const item = payload[0].payload
   const temp = item.temp
+  if (temp == null) return null
   const style = getTempBarStyle(temp)
   const diff = temp - avgTemp
   return (
@@ -300,7 +303,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   <ReferenceLine y={chartInsights.avgTraffic} stroke="#64748b" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${chartInsights.avgTraffic.toFixed(1)} km/s`, position: 'insideTopRight', fill: '#64748b', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="traffic" name="Hız" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
                     {chartData.map((entry) => <Cell key={entry.fullName} fill={`url(#${getTrafficBarStyle(entry.traffic).gradId})`} />)}
-                    <LabelList dataKey="traffic" position="top" offset={5} formatter={(val) => Number(val).toFixed(1)} style={LABEL_STYLE} />
+                    <LabelList dataKey="traffic" position="top" offset={5} formatter={(val) => (val != null ? Number(val).toFixed(1) : '')} style={LABEL_STYLE} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -498,7 +501,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   <ReferenceLine y={chartInsights.avgAqi} stroke="#047857" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${Math.round(chartInsights.avgAqi)} puan`, position: 'insideTopRight', fill: '#047857', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="aqi" name="Hava Puanı" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
                     {chartData.map((entry) => <Cell key={entry.fullName} fill={`url(#${getAqiBarStyle(entry.aqi).gradId})`} />)}
-                    <LabelList dataKey="aqi" position="top" offset={5} formatter={(val) => `${Math.round(Number(val))}`} style={LABEL_STYLE} />
+                    <LabelList dataKey="aqi" position="top" offset={5} formatter={(val) => (val != null ? `${Math.round(Number(val))}` : '')} style={LABEL_STYLE} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -584,7 +587,7 @@ function DistrictComparisonPanel({ chartData, chartInsights }) {
                   <ReferenceLine y={chartInsights.avgTemp} stroke="#0e7490" strokeDasharray="4 4" strokeWidth={1.5} label={{ value: `Ort. ${chartInsights.avgTemp.toFixed(1)} °C`, position: 'insideTopRight', fill: '#0e7490', fontSize: 11, fontWeight: 700 }} />
                   <Bar dataKey="temp" name="Sıcaklık" radius={[6, 6, 2, 2]} maxBarSize={26} isAnimationActive={false}>
                     {chartData.map((entry) => <Cell key={entry.fullName} fill={`url(#${getTempBarStyle(entry.temp).gradId})`} />)}
-                    <LabelList dataKey="temp" position="top" offset={5} formatter={(val) => `${Number(val).toFixed(1)}°`} style={LABEL_STYLE} />
+                    <LabelList dataKey="temp" position="top" offset={5} formatter={(val) => (val != null ? `${Number(val).toFixed(1)}°` : '')} style={LABEL_STYLE} />
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>

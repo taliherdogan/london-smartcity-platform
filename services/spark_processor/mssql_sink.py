@@ -222,6 +222,11 @@ class MSSQLSink:
                         if isinstance(rec_at, datetime)
                         else str(rec_at)
                     )
+                    method = al.get("tespit_yontemi") or ""
+                    z_val = float(al["z_skoru"]) if al.get("z_skoru") is not None else 0.0
+                    val = float(al["olculen_deger"]) if al.get("olculen_deger") is not None else 0.0
+                    ref_val = float(al["referans_deger"]) if al.get("referans_deger") is not None else None
+                    is_low = (ref_val is not None and val < ref_val) or (ref_val is None and z_val < 0)
                     alerts_out.append(
                         {
                             "alert_id": al["uyari_id"],
@@ -232,14 +237,14 @@ class MSSQLSink:
                             "metric_label": al.get("metrik_etiketi") or "",
                             "unit": al.get("birim") or "",
                             "severity": al["seviye"],
-                            "method": al.get("tespit_yontemi") or "",
-                            "z_score": float(al["z_skoru"]) if al.get("z_skoru") is not None else 0.0,
-                            "value": float(al["olculen_deger"]) if al.get("olculen_deger") is not None else 0.0,
-                            "baseline_value": (
-                                float(al["referans_deger"]) if al.get("referans_deger") is not None else None
+                            "method": method,
+                            "z_score": z_val,
+                            "value": val,
+                            "baseline_value": ref_val,
+                            "baseline_label": (
+                                "Son 1 Dakika Ortalaması" if method == "Z-Score Sapması" else "Normal Değer"
                             ),
-                            "baseline_label": "Normal Değer",
-                            "direction": "high",
+                            "direction": "low" if is_low else "high",
                             "threshold_label": al.get("esik_etiketi") or "",
                             "message": al.get("aciklama") or "",
                             "injected": bool(al.get("test_enjekte")),

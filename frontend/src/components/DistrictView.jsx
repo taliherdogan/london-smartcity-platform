@@ -12,12 +12,11 @@ const STATUS_FILTERS = [
 
 const PAGE_SIZE_OPTIONS = [6, 12]
 
-function DistrictView({ districts = [], sources = {} }) {
+function DistrictView({ districts = [] }) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [pageSize, setPageSize] = useState(6)
   const [page, setPage] = useState(1)
-  const corridorStatuses = sources?.traffic?.corridor_statuses || {}
 
   const stats = useMemo(() => {
     let normal = 0
@@ -76,43 +75,67 @@ function DistrictView({ districts = [], sources = {} }) {
   const chartData = useMemo(() => {
     const totalE = districts.reduce((acc, d) => acc + (d.metrics?.energy?.avg ?? 0), 0)
     return districts.map((d) => {
-      const energy = Number((d.metrics?.energy?.avg ?? 0).toFixed(1))
+      const rawTraffic = d.metrics?.traffic?.avg
+      const rawAqi = d.metrics?.air_quality?.avg
+      const rawEnergy = d.metrics?.energy?.avg
+      const rawTemp = d.metrics?.weather?.avg
+      const energy = rawEnergy != null ? Number(rawEnergy.toFixed(1)) : 0
       return {
         name: formatDistrictShortName(d.district_name),
         fullName: d.district_name,
-        traffic: Number((d.metrics?.traffic?.avg ?? 0).toFixed(1)),
-        aqi: Number((d.metrics?.air_quality?.avg ?? 0).toFixed(1)),
+        traffic: rawTraffic != null ? Number(rawTraffic.toFixed(1)) : null,
+        aqi: rawAqi != null ? Number(rawAqi.toFixed(1)) : null,
         energy,
-        temp: Number((d.metrics?.weather?.avg ?? 0).toFixed(1)),
-        energyShare: totalE > 0 ? Math.round((energy / totalE) * 100) : 0,
+        hasEnergy: rawEnergy != null,
+        temp: rawTemp != null ? Number(rawTemp.toFixed(1)) : null,
+        energyShare: totalE > 0 && rawEnergy != null ? Math.round((energy / totalE) * 100) : 0,
       }
     })
   }, [districts])
 
   const chartInsights = useMemo(() => {
     if (!chartData.length) return null
-    const avgTraffic = chartData.reduce((sum, item) => sum + item.traffic, 0) / chartData.length
-    const totalEnergy = chartData.reduce((sum, item) => sum + item.energy, 0)
-    const avgEnergy = totalEnergy / chartData.length
-    const avgAqi = chartData.reduce((sum, item) => sum + item.aqi, 0) / chartData.length
-    const avgTemp = chartData.reduce((sum, item) => sum + item.temp, 0) / chartData.length
+    const trafficItems = chartData.filter((item) => item.traffic != null)
+    const energyItems = chartData.filter((item) => item.hasEnergy)
+    const aqiItems = chartData.filter((item) => item.aqi != null)
+    const tempItems = chartData.filter((item) => item.temp != null)
 
-    let busiest = chartData[0]
-    let smoothest = chartData[0]
-    let peakEnergy = chartData[0]
-    let lowestEnergy = chartData[0]
-    let cleanestAqi = chartData[0]
-    let highestAqi = chartData[0]
-    let coolestTemp = chartData[0]
-    let warmestTemp = chartData[0]
+    const avgTraffic = trafficItems.length
+      ? trafficItems.reduce((sum, item) => sum + item.traffic, 0) / trafficItems.length
+      : 0
+    const totalEnergy = energyItems.reduce((sum, item) => sum + item.energy, 0)
+    const avgEnergy = energyItems.length ? totalEnergy / energyItems.length : 0
+    const avgAqi = aqiItems.length
+      ? aqiItems.reduce((sum, item) => sum + item.aqi, 0) / aqiItems.length
+      : 0
+    const avgTemp = tempItems.length
+      ? tempItems.reduce((sum, item) => sum + item.temp, 0) / tempItems.length
+      : 0
 
-    for (const item of chartData) {
+    let busiest = trafficItems[0] || { ...chartData[0], traffic: 0 }
+    let smoothest = trafficItems[0] || { ...chartData[0], traffic: 0 }
+    for (const item of trafficItems) {
       if (item.traffic < busiest.traffic) busiest = item
       if (item.traffic > smoothest.traffic) smoothest = item
+    }
+
+    let peakEnergy = energyItems[0] || chartData[0]
+    let lowestEnergy = energyItems[0] || chartData[0]
+    for (const item of energyItems) {
       if (item.energy > peakEnergy.energy) peakEnergy = item
       if (item.energy < lowestEnergy.energy) lowestEnergy = item
+    }
+
+    let cleanestAqi = aqiItems[0] || { ...chartData[0], aqi: 0 }
+    let highestAqi = aqiItems[0] || { ...chartData[0], aqi: 0 }
+    for (const item of aqiItems) {
       if (item.aqi < cleanestAqi.aqi) cleanestAqi = item
       if (item.aqi > highestAqi.aqi) highestAqi = item
+    }
+
+    let coolestTemp = tempItems[0] || { ...chartData[0], temp: 0 }
+    let warmestTemp = tempItems[0] || { ...chartData[0], temp: 0 }
+    for (const item of tempItems) {
       if (item.temp < coolestTemp.temp) coolestTemp = item
       if (item.temp > warmestTemp.temp) warmestTemp = item
     }
@@ -213,7 +236,6 @@ function DistrictView({ districts = [], sources = {} }) {
               <DistrictCard
                 key={d.district_id}
                 district={d}
-                corridorStatuses={corridorStatuses}
                 stats={stats}
               />
             ))}

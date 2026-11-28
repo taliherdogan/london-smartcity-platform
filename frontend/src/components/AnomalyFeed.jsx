@@ -96,9 +96,16 @@ function getComparisonInfo(al) {
   const pctDiff = Math.round(Math.abs(((val - base) / base) * 100))
   const isLower = val < base
 
+  const isTempAlert =
+    al.domain === 'weather' && al.unit !== 'm/s' && al.metric_label !== 'Rüzgar Hızı'
+
   let text = 'Ani değişim'
   let detailText = 'Ani değişim tespit edildi'
-  if (al.domain === 'traffic' && isLower && pctDiff >= 2) {
+  if (isTempAlert) {
+    const absDeg = Math.abs(val - base).toFixed(1)
+    text = isLower ? `-${absDeg} °C` : `+${absDeg} °C`
+    detailText = isLower ? `Normalden ${absDeg} °C daha soğuk` : `Normalden ${absDeg} °C daha sıcak`
+  } else if (al.domain === 'traffic' && isLower && pctDiff >= 2) {
     text = `%${pctDiff} daha yavaş`
     detailText = `Normalden %${pctDiff} daha yavaş`
   } else if (!isLower && ratio >= 1.8) {
@@ -344,14 +351,16 @@ function AnomalyFeed({ alerts = [], cumulativeAlerts = 0, isOffline = false }) {
   const [expandedId, setExpandedId] = useState(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
 
+  const hasAlerts = alerts.length > 0
+
   // Update relative timestamps every 5s (only while alerts exist, tab is visible, and online)
   useEffect(() => {
-    if (alerts.length === 0 || isOffline) return undefined
+    if (!hasAlerts || isOffline) return undefined
     const timer = setInterval(() => {
       if (!document.hidden) setNowMs(Date.now())
     }, 5000)
     return () => clearInterval(timer)
-  }, [alerts.length > 0, isOffline])
+  }, [hasAlerts, isOffline])
 
   const handleToggleExpand = useCallback((id) => {
     setExpandedId((prev) => (prev === id ? null : id))

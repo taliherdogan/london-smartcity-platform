@@ -12,7 +12,6 @@ Sources (all free, zero API key required):
 from __future__ import annotations
 
 import logging
-import math
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -53,6 +52,15 @@ SEVERITY_SPEED_MULTIPLIER = {
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_float(val: Any, default: float) -> float:
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def london_diurnal_traffic_factor(now: datetime | None = None) -> float:
@@ -191,12 +199,12 @@ def fetch_weather(client: httpx.Client, districts: list[dict[str, Any]] | None =
     pressures: list[float] = []
 
     for idx, item in enumerate(entries):
-        cur = item.get("current", {})
-        t = round(float(cur.get("temperature_2m", 9.5)), 2)
-        h = round(float(cur.get("relative_humidity_2m", 76.0)), 1)
-        w = round(float(cur.get("wind_speed_10m", 4.0)), 2)
-        p = round(float(cur.get("precipitation", 0.0)), 2)
-        pr = round(float(cur.get("surface_pressure", 1014.0)), 1)
+        cur = item.get("current") or {}
+        t = round(_safe_float(cur.get("temperature_2m"), 9.5), 2)
+        h = round(_safe_float(cur.get("relative_humidity_2m"), 76.0), 1)
+        w = round(_safe_float(cur.get("wind_speed_10m"), 4.0), 2)
+        p = round(_safe_float(cur.get("precipitation"), 0.0), 2)
+        pr = round(_safe_float(cur.get("surface_pressure"), 1014.0), 1)
         temps.append(t)
         hums.append(h)
         winds.append(w)
@@ -252,12 +260,12 @@ def fetch_air_quality(client: httpx.Client, districts: list[dict[str, Any]] | No
     ozones: list[float] = []
 
     for idx, item in enumerate(entries):
-        cur = item.get("current", {})
-        aqi = round(float(cur.get("european_aqi") or 28.0), 1)
-        pm25 = round(float(cur.get("pm2_5") or 6.0), 2)
-        pm10 = round(float(cur.get("pm10") or 11.0), 2)
-        no2 = round(float(cur.get("nitrogen_dioxide") or 16.0), 2)
-        o3 = round(float(cur.get("ozone") or 42.0), 2)
+        cur = item.get("current") or {}
+        aqi = round(_safe_float(cur.get("european_aqi"), 28.0), 1)
+        pm25 = round(_safe_float(cur.get("pm2_5"), 6.0), 2)
+        pm10 = round(_safe_float(cur.get("pm10"), 11.0), 2)
+        no2 = round(_safe_float(cur.get("nitrogen_dioxide"), 16.0), 2)
+        o3 = round(_safe_float(cur.get("ozone"), 42.0), 2)
         aqis.append(aqi)
         pm25s.append(pm25)
         pm10s.append(pm10)
@@ -366,23 +374,44 @@ def fetch_energy(client: httpx.Client, _districts: list[dict[str, Any]] | None =
         logger.warning("Elexon BMRS fetch warning (continuing with NESO): %s", exc)
 
     # 2. Official London Region 13 live carbon intensity & generation mix from NESO
-    c_resp = client.get(NESO_LONDON_CARBON_URL, headers={"Accept": "application/json"})
-    c_resp.raise_for_status()
-    c_payload = c_resp.json()
-    region_entry = c_payload["data"][0]
-    latest_slot = region_entry["data"][0]
-    intensity_obj = latest_slot.get("intensity", {})
-    raw_intensity = intensity_obj.get("actual")
-    if raw_intensity is None:
-        raw_intensity = intensity_obj.get("forecast", 180.0)
-    carbon_gco2 = float(raw_intensity)
-    intensity_idx = str(intensity_obj.get("index", "moderate"))
+    neso_ok = False
+    carbon_gco2 = 185.0
+    intensity_idx = "moderate"
+    renewable_pct = 34.0
+    low_carbon_pct = 46.0
+    try:
+        c_resp = client.get(NESO_LONDON_CARBON_URL, headers={"Accept": "application/json"})
+        c_resp.raise_for_status()
+        c_payload = c_resp.json()
+        data_list = c_payload.get("data") if isinstance(c_payload, dict) else None
+        if isinstance(data_list, list) and data_list and isinstance(data_list[0].get("data"), list) and data_list[0]["data"]:
+            latest_slot = data_list[0]["data"][0]
+            intensity_obj = latest_slot.get("intensity", {})
+            raw_intensity = intensity_obj.get("actual")
+            if raw_intensity is None:
+                raw_intensity = intensity_obj.get("forecast", 180.0)
+            carbon_gco2 = _safe_float(raw_intensity, 180.0)
+            intensity_idx = str(intensity_obj.get("index", "moderate"))
 
-    gen_mix = latest_slot.get("generationmix", [])
-    renewable_fuels = {"wind", "solar", "hydro", "biomass"}
-    renewable_pct = sum(float(g.get("perc", 0.0)) for g in gen_mix if str(g.get("fuel", "")).lower() in renewable_fuels)
-    nuclear_pct = sum(float(g.get("perc", 0.0)) for g in gen_mix if str(g.get("fuel", "")).lower() == "nuclear")
-    low_carbon_pct = renewable_pct + nuclear_pct
+            gen_mix = latest_slot.get("generationmix", [])
+            renewable_fuels = {"wind", "solar", "hydro", "biomass"}
+            renewable_pct = sum(
+                _safe_float(g.get("perc"), 0.0)
+                for g in gen_mix
+                if str(g.get("fuel", "")).lower() in renewable_fuels
+            )
+            nuclear_pct = sum(
+                _safe_float(g.get("perc"), 0.0)
+                for g in gen_mix
+                if str(g.get("fuel", "")).lower() == "nuclear"
+            )
+            low_carbon_pct = renewable_pct + nuclear_pct
+            neso_ok = True
+    except Exception as exc:
+        logger.warning("NESO London fetch warning: %s", exc)
+
+    if national_mw is None and not neso_ok:
+        raise RuntimeError("Both Elexon BMRS and NESO London energy APIs failed")
 
     if national_mw is None:
         national_mw = 34500.0

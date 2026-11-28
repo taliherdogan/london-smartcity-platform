@@ -49,6 +49,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+logging.getLogger("py4j").setLevel(logging.WARNING)
 logger = logging.getLogger("spark_processor")
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -238,6 +239,8 @@ EVENT_SCHEMA = StructType(
 )
 
 WINDOW_HISTORY: dict[tuple[str, str], deque[float]] = defaultdict(lambda: deque(maxlen=30))
+ZSCORE_OUTLIER_STREAK: dict[tuple[str, str], tuple[int, int]] = {}
+ZSCORE_REGIME_SHIFT_STREAK = 3
 DISTRICT_ENERGY_BASE: dict[str, float] = {}
 LATEST_DISTRICTS_STATE: dict[str, dict[str, Any]] = {}
 LATEST_DOMAIN_DISTRICT_METRICS: dict[str, dict[str, dict[str, Any]]] = {
@@ -471,13 +474,25 @@ def evaluate_threshold(
     return False, "info", "", "", None, "high"
 
 
-def evaluate_zscore(key: tuple[str, str], value: float) -> tuple[bool, float, float | None]:
-    """Layer 2: Sliding-window statistical Z-Score anomaly detection (bounded memory)."""
+def evaluate_zscore(
+    key: tuple[str, str],
+    value: float,
+    *,
+    is_injected: bool = False,
+) -> tuple[bool, float, float | None]:
+    """Layer 2: Sliding-window statistical Z-Score anomaly detection (bounded memory).
+
+    Transient spikes (1-2 batches) and injected test anomalies do not pollute the window,
+    while sustained same-direction shifts (3+ consecutive batches) adapt the window so
+    natural regime changes (e.g. rush hour -> off-peak, weather front) never freeze the
+    baseline into permanent false-positive alerts.
+    """
     if key not in WINDOW_HISTORY and len(WINDOW_HISTORY) >= MAX_STATE_KEYS:
         return False, 0.0, None
     hist = WINDOW_HISTORY[key]
     if len(hist) < 10:
         hist.append(value)
+        ZSCORE_OUTLIER_STREAK.pop(key, None)
         return False, 0.0, None
 
     mean = sum(hist) / len(hist)
@@ -488,7 +503,24 @@ def evaluate_zscore(key: tuple[str, str], value: float) -> tuple[bool, float, fl
 
     if abs(z) <= 3.2:
         hist.append(value)
+        ZSCORE_OUTLIER_STREAK.pop(key, None)
         return False, round(z, 2), round(mean, 2)
+
+    if not is_injected:
+        sign = 1 if z > 0 else -1
+        prev_sign, prev_count = ZSCORE_OUTLIER_STREAK.get(key, (0, 0))
+        streak = (prev_count + 1) if prev_sign == sign else 1
+        if streak >= ZSCORE_REGIME_SHIFT_STREAK:
+            # Sustained real-world regime shift: adapt baseline instead of freezing forever
+            hist.append(value)
+            if streak >= ZSCORE_REGIME_SHIFT_STREAK + 2:
+                # Re-anchor quickly once the new steady state is confirmed
+                hist.clear()
+                hist.append(value)
+                ZSCORE_OUTLIER_STREAK.pop(key, None)
+                return False, round(z, 2), round(mean, 2)
+        ZSCORE_OUTLIER_STREAK[key] = (sign, streak)
+
     return True, round(z, 2), round(mean, 2)
 
 
@@ -664,6 +696,7 @@ def main() -> None:
         .option("startingOffsets", "latest")
         .option("failOnDataLoss", "false")
         .option("maxOffsetsPerTrigger", MAX_OFFSETS_PER_TRIGGER)
+        .option("kafka.fetch.max.wait.ms", "50")
         .option("kafka.session.timeout.ms", "30000")
         .option("kafka.request.timeout.ms", "40000")
         .load()
@@ -692,10 +725,9 @@ def main() -> None:
             batch_df.persist(StorageLevel.MEMORY_AND_DISK)
 
         try:
-            # Single-pass, literal-free Spark aggregation (100% WholeStageCodegen cache hit across batches)
+            # Single-pass, literal-free Spark aggregation (avoids coalesce(4) serial Kafka polling)
             district_rows = (
-                batch_df.coalesce(4)
-                .groupBy("domain", "district_id")
+                batch_df.groupBy("domain", "district_id")
                 .agg(
                     F.count("*").alias("event_count"),
                     F.sum("value").alias("sum_value"),
@@ -750,11 +782,35 @@ def main() -> None:
                 drows = by_domain.get(d, [])
                 d_count = sum(int(r_item["event_count"]) for r_item in drows)
                 if d_count > 0:
-                    avg_prod_ms = sum(float(r_item["sum_produced_ms"] or now_ms) for r_item in drows) / d_count
-                    min_prod_ms = min(float(r_item["min_produced_ms"] or now_ms) for r_item in drows)
+                    avg_prod_ms = (
+                        sum(
+                            float(r_item["sum_produced_ms"])
+                            if r_item["sum_produced_ms"] is not None
+                            else float(now_ms) * int(r_item["event_count"])
+                            for r_item in drows
+                        )
+                        / d_count
+                    )
+                    min_prod_ms = min(
+                        float(r_item["min_produced_ms"])
+                        if r_item["min_produced_ms"] is not None
+                        else float(now_ms)
+                        for r_item in drows
+                    )
                     d_avg_lat = max(1.0, now_ms - avg_prod_ms)
                     group_lats = sorted(
-                        max(1.0, now_ms - (float(r_item["sum_produced_ms"] or now_ms) / max(1, int(r_item["event_count"]))))
+                        max(
+                            1.0,
+                            now_ms
+                            - (
+                                (
+                                    float(r_item["sum_produced_ms"])
+                                    if r_item["sum_produced_ms"] is not None
+                                    else float(now_ms) * max(1, int(r_item["event_count"]))
+                                )
+                                / max(1, int(r_item["event_count"]))
+                            ),
+                        )
                         for r_item in drows
                     )
                     d_p50 = group_lats[len(group_lats) // 2] if group_lats else d_avg_lat
@@ -790,6 +846,7 @@ def main() -> None:
                         "tfl_corridors": districts_by_id.get(did, {}).get("tfl_corridors", []),
                         "tfl_disruptions": 0,
                         "metrics": {},
+                        "domain_statuses": {},
                         "status": "normal",
                     }
                 if dom == "traffic" and row["district_disruptions"]:
@@ -801,8 +858,10 @@ def main() -> None:
                     "max": round(float(row["max_value"]), 2),
                     "count": int(row["event_count"]),
                 }
+                districts_map[did]["domain_statuses"][dom] = "normal"
 
                 avg_wind = float(row["avg_wind_speed_ms"] or 0.0)
+                is_injected = bool(row["has_injected"])
                 sec_check = {
                     "congestion_pct": float(row["avg_congestion_pct"] or 0.0),
                     "district_disruptions": float(row["district_disruptions"] or 0.0),
@@ -811,7 +870,7 @@ def main() -> None:
                 }
 
                 wind_z_hit, wind_z_val, wind_baseline = (
-                    evaluate_zscore((did, "weather_wind"), avg_wind)
+                    evaluate_zscore((did, "weather_wind"), avg_wind, is_injected=is_injected)
                     if dom == "weather"
                     else (False, 0.0, None)
                 )
@@ -823,7 +882,7 @@ def main() -> None:
                 if is_wind_event:
                     z_hit, z_val, baseline_mean = wind_z_hit, wind_z_val, wind_baseline
                 else:
-                    z_hit, z_val, baseline_mean = evaluate_zscore((did, dom), avg_val)
+                    z_hit, z_val, baseline_mean = evaluate_zscore((did, dom), avg_val, is_injected=is_injected)
 
                 if thresh_hit or z_hit:
                     if dom == "traffic":
@@ -876,6 +935,7 @@ def main() -> None:
                         )
                         thresh_label = "İstatistiksel sınır: |z| > 3.2"
 
+                    districts_map[did]["domain_statuses"][dom] = severity
                     prev_sev = districts_map[did]["status"]
                     if SEVERITY_ORDER.get(severity, 0) > SEVERITY_ORDER.get(prev_sev, 0):
                         districts_map[did]["status"] = severity
@@ -1041,6 +1101,13 @@ def main() -> None:
                     else:
                         merged_metrics = dict(prev_entry.get("metrics", {}))
                         merged_metrics.update(d_entry["metrics"])
+                        merged_dom_statuses = dict(prev_entry.get("domain_statuses", {}))
+                        merged_dom_statuses.update(d_entry.get("domain_statuses", {}))
+                        merged_status = max(
+                            merged_dom_statuses.values(),
+                            key=lambda s: SEVERITY_ORDER.get(s, 0),
+                            default="normal",
+                        )
                         has_traffic_update = "traffic" in d_entry["metrics"]
                         LATEST_DISTRICTS_STATE[did_k] = {
                             "district_id": d_entry["district_id"],
@@ -1053,13 +1120,17 @@ def main() -> None:
                                 else prev_entry.get("tfl_disruptions", 0)
                             ),
                             "metrics": merged_metrics,
-                            "status": d_entry["status"],
+                            "domain_statuses": merged_dom_statuses,
+                            "status": merged_status,
                         }
 
-                ordered_districts = sorted(
-                    LATEST_DISTRICTS_STATE.values(),
-                    key=lambda item: district_order.get(item["district_id"], 999),
-                )
+                ordered_districts = [
+                    {k: v for k, v in item.items() if k != "domain_statuses"}
+                    for item in sorted(
+                        LATEST_DISTRICTS_STATE.values(),
+                        key=lambda item: district_order.get(item["district_id"], 999),
+                    )
+                ]
 
                 live_payload = {
                     "timestamp": ts_iso,

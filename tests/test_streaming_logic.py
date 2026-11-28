@@ -52,6 +52,7 @@ import streaming_app  # noqa: E402
 @pytest.fixture(autouse=True)
 def _reset_streaming_state() -> None:
     streaming_app.WINDOW_HISTORY.clear()
+    streaming_app.ZSCORE_OUTLIER_STREAK.clear()
     streaming_app.DISTRICT_ENERGY_BASE.clear()
     streaming_app.DISTRICT_ENERGY_BASE["westminster"] = 1000.0
     for dom in streaming_app.VALID_DOMAINS:
@@ -125,6 +126,25 @@ def test_zscore_warmup_and_spike_detection() -> None:
     hit_spike, z_spike, _ = streaming_app.evaluate_zscore(key, 8.0)
     assert hit_spike is True
     assert z_spike < -3.2
+    assert 8.0 not in streaming_app.WINDOW_HISTORY[key]
+
+
+def test_zscore_adapts_on_sustained_regime_shift_but_not_injected() -> None:
+    key = ("hammersmith", "air_quality")
+    for _ in range(12):
+        streaming_app.evaluate_zscore(key, 40.0)
+
+    # Injected anomalies must never shift the baseline
+    for _ in range(6):
+        hit_inj, _, _ = streaming_app.evaluate_zscore(key, 110.0, is_injected=True)
+        assert hit_inj is True
+    assert all(v == 40.0 for v in streaming_app.WINDOW_HISTORY[key])
+
+    # Real sustained regime shift (40 -> 30 AQI) should adapt and stop spamming
+    hits = [streaming_app.evaluate_zscore(key, 30.0)[0] for _ in range(6)]
+    assert hits[0] is True
+    assert hits[-1] is False
+    assert 30.0 in streaming_app.WINDOW_HISTORY[key]
 
 
 def _make_row(domain: str, did: str, val: float, **extras: Any) -> dict[str, Any]:

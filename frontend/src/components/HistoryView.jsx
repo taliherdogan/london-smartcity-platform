@@ -77,13 +77,21 @@ function downsampleSeries(series, maxPoints) {
   return out
 }
 
+const LONDON_ISO_DATE_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/London',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+
 function isoDateDaysAgo(daysAgo) {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  const londonToday = LONDON_ISO_DATE_FMT.format(new Date())
+  const [y, m, d] = londonToday.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d - daysAgo))
+  const yy = dt.getUTCFullYear()
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(dt.getUTCDate()).padStart(2, '0')
+  return `${yy}-${mm}-${dd}`
 }
 
 const PRESETS = [
@@ -321,7 +329,7 @@ function HistoryTooltip({ active, payload, cfg, avg }) {
   )
 }
 
-const HistoryChartCard = memo(function HistoryChartCard({ cfg, series, domainSummary }) {
+const HistoryChartCard = memo(function HistoryChartCard({ cfg, series }) {
   const Icon = cfg.icon
 
   const chartStats = useMemo(() => {
@@ -507,6 +515,7 @@ function HistoryView() {
   const loadHistory = useCallback(
     async ({ forceRefresh = false } = {}) => {
       const params = new URLSearchParams()
+      const effGranularity = mode === 'single' ? 'hourly' : granularity
       if (mode === 'single') {
         params.set('date', singleDate)
       } else {
@@ -514,7 +523,7 @@ function HistoryView() {
         params.set('end_date', endDate)
       }
       params.set('district_id', districtId)
-      params.set('granularity', granularity)
+      params.set('granularity', effGranularity)
       const cacheKey = params.toString()
 
       if (!forceRefresh) {
@@ -678,6 +687,7 @@ function HistoryView() {
               type="button"
               onClick={() => {
                 setMode('single')
+                setGranularity('hourly')
                 setActivePreset(null)
               }}
               className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-colors ${
@@ -692,6 +702,7 @@ function HistoryView() {
               type="button"
               onClick={() => {
                 setMode('range')
+                setGranularity('auto')
                 setActivePreset(null)
               }}
               className={`rounded-lg px-2.5 py-1 text-xs font-bold transition-colors ${
@@ -985,7 +996,6 @@ function HistoryView() {
               key={cfg.key}
               cfg={cfg}
               series={series}
-              domainSummary={summary[cfg.key]}
             />
           ))}
         </section>
